@@ -56,6 +56,7 @@ While you play it records, about every 1-2 seconds: CPU load and real clock spee
 - Spikes (CPU > 90 %, free RAM < 1 GB, heavy paging, GPU > 95 %, disk latency > 50 ms) are logged by themselves.
 - **Ctrl+C** stops early and still writes the summary. Then answer **N** to "Terminate batch job?" to get back to the menu. Do not close the window with X: the summary is then missing (run choice 4 on the folder to make it).
 - Another game: the menu asks for its process name (Task Manager, Details tab, without `.exe`).
+- **NVIDIA FrameView** (optional, not bundled): if you record with FrameView during the run (its hotkey, Scroll Lock by default), its per-frame log is copied into the run folder at the end. When there are no PresentMon frame times, the summary takes them from that log and adds PC latency (input to display), dropped frames and FrameView's CPU temperature and CPU/GPU power. With both, PresentMon is used because it covers the whole run; `-FrameView <FrameView_..._Log.csv>` picks the FrameView log. The frames line also shows 1 % low and 0.1 % low fps (the average of the slowest 1 % and 0.1 % of the frames). The import was built from FrameView's documented columns and tested on synthetic logs, not yet on a real capture.
 
 `summary.txt` gives min/avg/max of every measure, then a verdict, then a diagnosis of each F9 mark. Loading screens at the start and the end are left out: by frame rate when frame times exist, otherwise the first 120 s after a game start seen in the log and the last few samples.
 
@@ -86,7 +87,7 @@ If nothing stands out and F9 marks show no frame hitch, the stutter is likely no
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scan-check.ps1 -Fast -Out "$env:USERPROFILE\Desktop\scans\report.txt"   # -BudgetSec 600 = longer file walk
 powershell -ExecutionPolicy Bypass -File .\disk-log.ps1 -Minutes 30 -Game r5apex_dx12     # -Dir <folder>, -PresentMon <exe>
-powershell -ExecutionPolicy Bypass -File .\disk-log.ps1 -Summarize "$env:USERPROFILE\Desktop\disk-log\run-2026-10-25_16-37-00"
+powershell -ExecutionPolicy Bypass -File .\disk-log.ps1 -Summarize "$env:USERPROFILE\Desktop\disk-log\run-2026-10-25_16-37-00"   # -FrameView <FrameView_..._Log.csv>
 ```
 
 ## Development
@@ -108,6 +109,7 @@ Scannx on Windowsi kontrollid kahele küsimusele: **kas arvutis peidab end midag
 
 1. Lae [Releases](https://github.com/jakobmart4/Scannx-Tools/releases) alt `Scannx-<versioon>.zip`. Paremklõps, **Properties**, linnuke **Unblock** kasti, pakki lahti.
 2. Topeltklõps **`Scannx.cmd`**, luba administraatori õigused. Kui Windows hoiatab ("Windows protected your PC"): **More info**, **Run anyway** (skriptid pole allkirjastatud).
-3. Menüü: **1** täisskänn, **2** kiirskänn, **3** hakkimise logi (käivita **enne** mängu, hakkimisel vajuta **F9**; Ctrl+C lõpetab varem, siis vasta "Terminate batch job" küsimusele **N**), **4** vana logi kokkuvõte uuesti.
+3. Kui salvestad mängu ajal ka **NVIDIA FrameView**'ga (Scroll Lock), võtab hakkimise logi selle kaadrilogi lõpus kaasa: PresentMoni puudumisel tulevad kaadriajad sealt, lisaks PC latentsus, kuvamata kaadrid ning CPU temperatuur ja võimsus. Päris FrameView logiga veel proovimata.
+4. Menüü: **1** täisskänn, **2** kiirskänn, **3** hakkimise logi (käivita **enne** mängu, hakkimisel vajuta **F9**; Ctrl+C lõpetab varem, siis vasta "Terminate batch job" küsimusele **N**), **4** vana logi kokkuvõte uuesti.
 
 Raportid tulevad Desktopile (`scan-report.txt`, `disk-log\run-...\summary.txt`). Neis on failiteed ja kasutajanimi: vaata üle enne jagamist. FLAGS on vihjed, mitte otsus. Scannx ei asenda viirusetõrjet, tee ka Defenderi täisskänn.

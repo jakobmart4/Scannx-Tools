@@ -11,6 +11,8 @@ Fixes from a full review of v1.0.0.
 - **Scan, detections**: a recent Defender detection is flagged even when Defender gives no name for it.
 - **Scan, file walk**: a vendor name somewhere in the path (`GoogleUpdater.exe`, a folder named `Cache`) no longer hides a file. ProgramData is walked first, so the time budget cuts the least important folders.
 - **Scan, report**: the head now says what was not checked (`NOT CHECKED`, `COULD NOT READ`), so "none" is not read as a clean bill of health. If the report cannot be written, the `.partial` file is kept and the message says so instead of "Done".
+- **Stutter log, NVIDIA FrameView** (new): a FrameView per-frame log recorded during the run is copied into the run folder. Without PresentMon frame times the summary reads them from it and adds PC latency, dropped frames and FrameView's CPU/GPU sensors; `-FrameView <file>` picks it explicitly. Built from FrameView's documented columns, not yet tried on a real capture.
+- **Stutter log**: the frames line shows 1 % low and 0.1 % low fps.
 - Tests: unit tests for the scan's rules (`tests/scan-rules.Tests.ps1`) and for the regional formats.
 
 ## v1.0.0 - 2026-10-25

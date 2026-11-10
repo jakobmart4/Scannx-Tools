@@ -7,6 +7,7 @@ Each step stays small and checkable: change, test, update this file and `CHANGEL
 
 - Stutter log: fixed number and time formats (a decimal-comma Windows broke `log.csv`).
 - Scan: services, scheduled tasks, Defender exclusions, detections and the file walk filters tightened; the report says what was not checked.
+- Stutter log: NVIDIA FrameView per-frame logs as a second frame source (`tests/frameview.Tests.ps1`, synthetic). **Not yet tried on a real FrameView capture**: the first real log decides whether the file-name time is the capture start and whether any column is quoted.
 - Scan rules have unit tests (`tests/scan-rules.Tests.ps1`), mutation-checked: 17 broken copies of the rules, every one fails a test.
 
 ## Open from the review (next)
@@ -31,7 +32,7 @@ Each step stays small and checkable: change, test, update this file and `CHANGEL
 ## Ideas (not planned yet)
 
 - Scan: command lines of autostarts and services, more Run keys, signs of protection being switched off (Defender settings and events, Windows Update services, Win+R history), processes with a system name in the wrong folder, kernel drivers, browser extensions, a saved baseline, `-Json` output.
-- Stutter log: DPC/interrupt time, the busiest single core, VRAM overflow into shared memory, CPU-side vs GPU-side hitches from PresentMon's busy times, a snapshot of power plan / memory speed, a frame log from NVIDIA FrameView as a second source.
+- Stutter log: DPC/interrupt time, the busiest single core, VRAM overflow into shared memory, CPU-side vs GPU-side hitches from PresentMon's busy times, a snapshot of power plan / memory speed, RivaTuner Statistics Server as a frame source and for on-screen feedback.
 - Release: build provenance (artifact attestation), immutable releases, actions pinned by commit, `SECURITY.md`.
 - Measure the connection to the game server itself.
 

@@ -6,8 +6,11 @@
 # Each run gets its own folder: Desktop\disk-log\run-<date_time>\ . Asks for the duration unless -Minutes is given.
 # Frame times: when run as admin and an Intel-signed PresentMon-<version>-x64.exe is found (-PresentMon, this folder, or RivaTuner's plugin folder),
 # PresentMon records the game's frames to frames.csv and the summary adds frame-time hitches.
+# NVIDIA FrameView: if you record with it during the run (its hotkey, Scroll Lock by default), its per-frame log is copied into the run folder
+# at the end. Without frames.csv the summary takes the frame times from it and adds PC latency, dropped frames and its CPU/GPU sensors.
+# -FrameView <FrameView_..._Log.csv> uses that log instead of frames.csv.
 # -Summarize <run folder> re-creates summary.txt for an existing run (also handy to test the verdict logic).
-param([double]$Minutes = 0, [string[]]$Game = @('r5apex_dx12','r5apex'), [string]$Dir = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'disk-log'), [string]$Summarize = '', [string]$PresentMon = '')
+param([double]$Minutes = 0, [string[]]$Game = @('r5apex_dx12','r5apex'), [string]$Dir = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'disk-log'), [string]$Summarize = '', [string]$PresentMon = '', [string]$FrameView = '')
 $ErrorActionPreference = 'SilentlyContinue'
 # PS 5.1 formats numbers in -join and .ToString() by the regional format: with a decimal comma (et-EE, de-DE, fi-FI...) every "12,3"
 # added a column to log.csv and the summary read the wrong columns without any error. Fixed formats for the whole run:
@@ -26,10 +29,35 @@ function Write-Summary($run) {
   # note: seconds of the day, a run across midnight is not handled. [:.]: logs written before v1.0.1 on fi-FI and similar have 13.45.10
   $secs = { param($t) $q = $t -split '[:.]'; [int]$q[0] * 3600 + [int]$q[1] * 60 + [int]$q[2] }
   $clock = { param($s) [timespan]::FromSeconds([math]::Floor($s)).ToString('hh\:mm\:ss') }
-  # frame times from PresentMon (frames.csv): only the game's busiest swap chain, sorted by time
-  $fT = [double[]]@(); $fMs = [double[]]@(); $fs = @(); $frF = Join-Path $run 'frames.csv'
-  if (Test-Path $frF) {
-    $by = @{}; $iT = -1; $iF = -1; $iS = -1
+  # frame times: PresentMon's frames.csv, or the per-frame logs of NVIDIA FrameView (FrameView_<exe>_<date>T<time>_Log.csv) when there is
+  # no frames.csv or -FrameView names one. Only the game's busiest swap chain, sorted by time.
+  $fT = [double[]]@(); $fMs = [double[]]@(); $fs = @(); $frF = Join-Path $run 'frames.csv'; $by = @{}; $fvNote = ''; $xs = $null
+  $fvN = 'MsPCLatency', 'Dropped', 'CPU Package Temp(C)', 'CPU Package Power(W)', 'NV Pwr(W) (API)'   # FrameView extras, read by column name
+  $fvF = @(if ($FrameView) { Get-Item $FrameView } else { Get-ChildItem $run -Filter 'FrameView_*_Log.csv' | Sort-Object Name })
+  $NewSc = { [pscustomobject]@{ T = New-Object Collections.Generic.List[double]; F = New-Object Collections.Generic.List[double]; X = New-Object Collections.Generic.List[double[]] } }
+  if ($fvF.Count -and ($FrameView -or -not (Test-Path $frF))) {
+    $inv = [Globalization.CultureInfo]::InvariantCulture; $flt = [Globalization.NumberStyles]::Float; $nFv = 0
+    foreach ($ff in $fvF) {
+      # TimeInSeconds counts from the start of the capture and the file name carries that start as local time: no clock alignment needed.
+      # ponytail: plain Split(','), so a quoted field with a comma in it would shift the columns; parse quotes if a real log ever has one
+      if ($ff.Name -notmatch '_\d{4}_\d\d_\d\dT(\d\d)(\d\d)(\d\d)_Log\.csv$') { continue }
+      $start = [int]$Matches[1] * 3600 + [int]$Matches[2] * 60 + [int]$Matches[3]; $ix = $null
+      foreach ($ln in [IO.File]::ReadLines($ff.FullName)) {
+        $fc = $ln.Split(',')
+        if (-not $ix) { $ix = @{}; for ($j = 0; $j -lt $fc.Count; $j++) { $ix[$fc[$j].Trim()] = $j }
+          if (-not ($ix.ContainsKey('TimeInSeconds') -and $ix.ContainsKey('MsBetweenPresents'))) { break }; $nFv++; continue }
+        $ts = 0.0; $ms = 0.0
+        if ($fc.Count -le [math]::Max($ix['TimeInSeconds'], $ix['MsBetweenPresents']) -or -not [double]::TryParse($fc[$ix['TimeInSeconds']], $flt, $inv, [ref]$ts) -or -not [double]::TryParse($fc[$ix['MsBetweenPresents']], $flt, $inv, [ref]$ms)) { continue }
+        $sc = if ($ix.ContainsKey('SwapChainAddress')) { $fc[$ix['SwapChainAddress']] } else { '' }
+        if (-not $by.ContainsKey($sc)) { $by[$sc] = & $NewSc }
+        $x = New-Object double[] $fvN.Count   # NaN = the column is missing or holds NA
+        for ($j = 0; $j -lt $fvN.Count; $j++) { $v = 0.0; $c = $ix[$fvN[$j]]; $x[$j] = if ($null -ne $c -and $c -lt $fc.Count -and [double]::TryParse($fc[$c], $flt, $inv, [ref]$v)) { $v } else { [double]::NaN } }
+        $by[$sc].T.Add(($start + $ts) % 86400); $by[$sc].F.Add($ms); $by[$sc].X.Add($x)
+      }
+    }
+    if ($nFv) { $fvNote = "NVIDIA FrameView log ($nFv file$(if ($nFv -gt 1) { 's' }))" }
+  } elseif (Test-Path $frF) {
+    $iT = -1; $iF = -1; $iS = -1
     foreach ($ln in [IO.File]::ReadLines($frF)) {
       $fc = $ln.Split(',')
       # the last *DateTime column wins: CPUStartDateTime when TimeInDateTime is there too (PresentMon 2.x)
@@ -40,17 +68,23 @@ function Write-Summary($run) {
       $hms = $fc[$iT].Split(' ')[-1].Split(':')   # "2026-10-25 9:03:07.123456789", local time
       if ($hms.Count -ne 3) { continue }   # 'NA' or blank time: skip the row, or T and F lose step
       $sc = if ($iS -ge 0) { $fc[$iS] } else { '' }
-      if (-not $by.ContainsKey($sc)) { $by[$sc] = [pscustomobject]@{ T = New-Object Collections.Generic.List[double]; F = New-Object Collections.Generic.List[double] } }
+      if (-not $by.ContainsKey($sc)) { $by[$sc] = & $NewSc }
       $by[$sc].T.Add([int]$hms[0] * 3600 + [int]$hms[1] * 60 + [double]$hms[2]); $by[$sc].F.Add($ms)
     }
-    $best = $by.Values | Sort-Object { $_.F.Count } -Descending | Select-Object -First 1
-    if ($best) { $fT = $best.T.ToArray(); $fMs = $best.F.ToArray()
+  }
+  $best = $by.Values | Sort-Object { $_.F.Count } -Descending | Select-Object -First 1
+  if ($best) { $fT = $best.T.ToArray()
+    if (-not $fvNote) {
       # PresentMon 2.3.1 writes its "local" time shifted by the UTC offset (seen: +2 h). Align with log.csv by the whole half hours between
       # the first frame in the file and the first game row (the game presents within seconds of starting; time zones are whole or half hours).
       # Shift and wrap BEFORE sorting: the skewed clock passes midnight at 22:00 real time.
       $g0 = if ($g.Count) { $g[0] } else { $rows[0] }; $sh = 1800 * [math]::Round(($fT[0] - (& $secs $g0.time)) / 1800)
       if ($sh) { for ($j = 0; $j -lt $fT.Count; $j++) { $fT[$j] = ((($fT[$j] - $sh) % 86400) + 86400) % 86400 } }
-      [array]::Sort($fT, $fMs) }
+    }
+    # sort by time through an index, so the frame times (and the FrameView extras) follow
+    $ord = New-Object int[] $fT.Count; for ($j = 0; $j -lt $ord.Count; $j++) { $ord[$j] = $j }
+    [array]::Sort($fT, $ord); $fMs = New-Object double[] $ord.Count; for ($j = 0; $j -lt $ord.Count; $j++) { $fMs[$j] = $best.F[$ord[$j]] }
+    if ($fvNote) { $xs = New-Object 'double[][]' $ord.Count; for ($j = 0; $j -lt $ord.Count; $j++) { $xs[$j] = $best.X[$ord[$j]] } }
   }
   $FrameAt = { param($t) $x = [array]::BinarySearch($fT, [double]$t); if ($x -lt 0) { -bnot $x } else { $x } }   # first frame at or after second $t
   # playing span from the frame rate: first to last 30 s (6 windows of 5 s) at >= 80 % of the median 5 s frame count. This cuts the
@@ -101,7 +135,20 @@ function Write-Summary($run) {
     $fMed = $srt[[int][math]::Floor(($srt.Count - 1) / 2)]; $fP99 = $srt[[int][math]::Ceiling(0.99 * $srt.Count) - 1]
     $hitchMs = [math]::Max(25, 3 * $fMed); $nHi = 0; $fSum = 0.0; $wI = 0
     for ($j = 0; $j -lt $fs.Count; $j++) { $fSum += $fs[$j]; if ($fs[$j] -gt $hitchMs) { $nHi++ }; if ($fs[$j] -gt $fs[$wI]) { $wI = $j } }
-    $L += 'frames           {0} frames, avg {1:N0} fps, median {2:N1} ms, p99 {3:N1} ms, max {4:N1} ms, {5} hitches over {6:N0} ms' -f $fs.Count, (1000 * $fs.Count / $fSum), $fMed, $fP99, $fs[$wI], $nHi, $hitchMs
+    # 1 % low / 0.1 % low as FrameView and CapFrameX give them: the average of the slowest 1 % (0.1 %) of the frames, as fps
+    $Low = { param($part) $n = [math]::Max(1, [int][math]::Floor($srt.Count * $part)); $s = 0.0; for ($j = $srt.Count - $n; $j -lt $srt.Count; $j++) { $s += $srt[$j] }; 1000 * $n / $s }
+    if ($fvNote) { $L += "frame source     $fvNote" }
+    elseif ($fvF.Count) { $L += 'frame source     PresentMon (frames.csv). The FrameView log in this folder is not used; -FrameView <file> summarizes with it instead' }
+    $L += 'frames           {0} frames, avg {1:N0} fps, median {2:N1} ms, p99 {3:N1} ms, max {4:N1} ms, {5} hitches over {6:N0} ms, 1% low {7:N0} fps, 0.1% low {8:N0} fps' -f $fs.Count, (1000 * $fs.Count / $fSum), $fMed, $fP99, $fs[$wI], $nHi, $hitchMs, (& $Low 0.01), (& $Low 0.001)
+    if ($xs) {   # FrameView extras over the same frames; NA cells (NaN) are left out
+      $Agg = { param($k) $n = 0; $s = 0.0; $m = 0.0; for ($j = $f0; $j -le $f1; $j++) { $v = $xs[$j][$k]; if (-not [double]::IsNaN($v)) { $n++; $s += $v; if ($v -gt $m) { $m = $v } } }; [pscustomobject]@{ N = $n; Sum = $s; Max = $m } }
+      $a = & $Agg 0; if ($a.N) { $L += 'pcLatency        avg {0:N1} ms, max {1:N1} ms (input to display; {2} frames with data)' -f ($a.Sum / $a.N), $a.Max, $a.N }
+      $a = & $Agg 1; if ($a.N) { $L += 'dropped frames   {0:N0} of {1} ({2:N1} %)' -f $a.Sum, $a.N, (100 * $a.Sum / $a.N) }
+      $sn = @(); $a = & $Agg 2; if ($a.N) { $sn += 'CPU temp avg {0:N0} / max {1:N0} C' -f ($a.Sum / $a.N), $a.Max }
+      $a = & $Agg 3; if ($a.N) { $sn += 'CPU power avg {0:N0} / max {1:N0} W' -f ($a.Sum / $a.N), $a.Max }
+      $a = & $Agg 4; if ($a.N) { $sn += 'GPU power avg {0:N0} / max {1:N0} W' -f ($a.Sum / $a.N), $a.Max }
+      if ($sn) { $L += 'sensors          ' + ($sn -join ', ') + ' (from FrameView)' }
+    }
   }
   $availMin = ((& $Vals $use availMB) | Measure-Object -Minimum).Minimum; $pgInMax = ((& $Vals $use pgIn) | Measure-Object -Maximum).Maximum
   $commitMax = ((& $Vals $use commitPct) | Measure-Object -Maximum).Maximum
@@ -186,6 +233,7 @@ if ($Minutes -le 0) {
   if ([double]::TryParse(($ans -replace ',', '.'), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$p) -and $p -gt 0) { $Minutes = $p }
 }
 
+$started = Get-Date
 $run = Join-Path $Dir ('run-' + (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 New-Item $run -ItemType Directory -Force | Out-Null
 $csv = Join-Path $run 'log.csv'; $ev = Join-Path $run 'events.txt'
@@ -326,5 +374,9 @@ try {
 } finally {
   # stopping the trace session makes PresentMon flush frames.csv and exit; kill it only if it hangs
   if ($pmP) { & $pm.FullName --terminate_existing_session --session_name Scannx 2>&1 | Out-Null; if (-not $pmP.WaitForExit(5000)) { Stop-Process -Id $pmP.Id -Force } }
+  # NVIDIA FrameView logs recorded during this run: take a copy along (FrameView's own files stay where they are)
+  $fvDir = @(Get-Content "$env:ProgramFiles\NVIDIA Corporation\FrameView\Settings.ini" | ForEach-Object { if ($_ -match '^BenchmarkDirectory=(.+)$') { $Matches[1].Trim() } })[0]
+  if (-not $fvDir) { $fvDir = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'FrameView' }
+  Get-ChildItem $fvDir -Filter 'FrameView_*_Log.csv' | Where-Object { $_.LastWriteTime -ge $started } | Copy-Item -Destination $run
   Write-Summary $run
 }
