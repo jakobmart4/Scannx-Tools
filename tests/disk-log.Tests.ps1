@@ -8,6 +8,30 @@ function Summarize($case) {
   try { & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Summarize $tmp | Out-String } finally { Remove-Item $tmp -Recurse -Force }
 }
 
+# Same, but under another regional format and/or with the copied log changed first. Runs from a temp .ps1 (-File keeps the culture
+# for the whole run) and ends with a JOIN= line: PS 5.1 formats numbers in -join by the current culture (et-EE: 1,5), which broke log.csv.
+function SummarizeIn($case, $culture, [scriptblock]$prep) {
+  $tmp = Join-Path $env:TEMP ('scannx-' + $case + '-' + [guid]::NewGuid().ToString('N'))
+  Copy-Item (Join-Path $here "fixtures\$case") $tmp -Recurse
+  if ($prep) { & $prep $tmp }
+  $run = "$tmp.ps1"
+  "[Threading.Thread]::CurrentThread.CurrentCulture = '$culture'`r`n. '$script' -Summarize '$tmp'`r`n'JOIN=' + ((1.5, 2.5) -join ',')" | Set-Content $run -Encoding ascii
+  try { & powershell -NoProfile -ExecutionPolicy Bypass -File $run | Out-String } finally { Remove-Item $tmp, $run -Recurse -Force }
+}
+
+Describe 'disk-log.ps1 regional formats' {
+  Context 'decimal-comma Windows (et-EE)' {
+    $out = SummarizeIn 'pressure' 'et-EE'
+    It 'switches to the invariant culture, so log.csv rows keep decimal points' { $out | Should Match 'JOIN=1\.5,2\.5' }
+    It 'gives the same verdict as on en-US' { $out | Should Match 'MEMORY pressure'; $out | Should Match 'pagefilePct\s+min\s+45\.0' }
+  }
+  Context 'a log written with a dot as the time separator (fi-FI, before the fix)' {
+    $out = SummarizeIn 'launch' 'fi-FI' { param($d) $f = Join-Path $d 'log.csv'; (Get-Content $f) -replace '^(\d\d):(\d\d):(\d\d),', '$1.$2.$3,' | Set-Content $f -Encoding ascii }
+    It 'still skips the game start-up' { $out | Should Match 'game start-up/exit skipped' }
+    It 'does not report the launch as memory pressure' { $out | Should Not Match 'MEMORY pressure' }
+  }
+}
+
 Describe 'disk-log.ps1 -Summarize' {
   Context 'memory pressure (game already running, working set trimmed)' {
     $out = Summarize 'pressure'

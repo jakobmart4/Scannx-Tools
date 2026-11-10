@@ -9,7 +9,10 @@
 # -Summarize <run folder> re-creates summary.txt for an existing run (also handy to test the verdict logic).
 param([double]$Minutes = 0, [string[]]$Game = @('r5apex_dx12','r5apex'), [string]$Dir = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'disk-log'), [string]$Summarize = '', [string]$PresentMon = '')
 $ErrorActionPreference = 'SilentlyContinue'
-$Game = @($Game | ForEach-Object { $_ -replace '\.exe$', '' })   # 'r5apex.exe' would become --process_name r5apex.exe.exe and never match
+# PS 5.1 formats numbers in -join and .ToString() by the regional format: with a decimal comma (et-EE, de-DE, fi-FI...) every "12,3"
+# added a column to log.csv and the summary read the wrong columns without any error. Fixed formats for the whole run:
+[Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
+$Game =@($Game | ForEach-Object { $_ -replace '\.exe$', '' })   # 'r5apex.exe' would become --process_name r5apex.exe.exe and never match
 $PSDefaultParameterValues['Set-Content:Encoding'] = 'utf8'; $PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'   # PS 5.1 would write ANSI (Add-Content) / UTF-16 (Tee-Object): grep and editors choke on it
 
 function Write-Summary($run) {
@@ -20,7 +23,8 @@ function Write-Summary($run) {
   $dcols = @($cols | Where-Object { $_ -match ' latMs$' } | ForEach-Object { $_ -replace ' latMs$','' })
   $g = @($rows | Where-Object gameOn -eq '1'); $use = @(if ($g.Count) { $g } else { $rows })   # @(): a 1-row log would unroll to a scalar without .Count
   $warm = ''
-  $secs = { param($t) $q = $t -split ':'; [int]$q[0] * 3600 + [int]$q[1] * 60 + [int]$q[2] }   # note: seconds of the day, a run across midnight is not handled
+  # note: seconds of the day, a run across midnight is not handled. [:.]: logs written before v1.0.1 on fi-FI and similar have 13.45.10
+  $secs = { param($t) $q = $t -split '[:.]'; [int]$q[0] * 3600 + [int]$q[1] * 60 + [int]$q[2] }
   $clock = { param($s) [timespan]::FromSeconds([math]::Floor($s)).ToString('hh\:mm\:ss') }
   # frame times from PresentMon (frames.csv): only the game's busiest swap chain, sorted by time
   $fT = [double[]]@(); $fMs = [double[]]@(); $fs = @(); $frF = Join-Path $run 'frames.csv'
@@ -178,7 +182,8 @@ Add-Type -Namespace W -Name K -MemberDefinition '[DllImport("user32.dll")] publi
 if ($Minutes -le 0) {
   $ans = Read-Host 'How many minutes to log? Enter = 60'
   $Minutes = 60; $p = 0.0
-  if ([double]::TryParse($ans, [ref]$p) -and $p -gt 0) { $Minutes = $p }
+  # "0,5" and "0.5" both mean half a minute, whatever the regional format (de-DE used to read "1.5" as 15)
+  if ([double]::TryParse(($ans -replace ',', '.'), [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$p) -and $p -gt 0) { $Minutes = $p }
 }
 
 $run = Join-Path $Dir ('run-' + (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
