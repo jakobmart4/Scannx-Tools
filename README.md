@@ -28,11 +28,12 @@ The report starts with **FLAGS**: things worth a look. A flag is a hint, not a v
 | Area | Flagged when |
 |---|---|
 | Defender | real-time protection is off, status cannot be read, no full scan in 14 days, signatures older than 3 days, Tamper Protection off |
-| Exclusions (admin) | exclusions set by **policy** (`HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions`, a malware trick: `Remove-MpPreference` cannot remove them), suspicious exclusions (drive roots, Temp, AppData, Program Files, hex-named folders, miner names), or any exclusions at all ("check they are yours") |
-| Exclusion history | Defender event 5007 shows exclusions added in the last 90 days (readable without admin) |
+| Exclusions (admin) | exclusions set by **policy** (`HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions`, a malware trick: `Remove-MpPreference` cannot remove them), suspicious exclusions (drive roots, Temp, AppData, Program Files, hex-named folders, miner names, extensions such as `exe` or `dll`), or any exclusions at all ("check they are yours") |
+| Exclusion history | Defender event 5007 shows exclusions added in the last 90 days (readable without admin; the event text must be in English) |
 | Detections | Defender detections in the last 14 days |
 | Autostart | an enabled Run entry points to a missing file or to `ProgramData`, `Temp` or `Users\Public` |
-| Scheduled tasks, services | non-Microsoft tasks or auto-start services in those unusual places, or tasks named like known miners |
+| Scheduled tasks | a task runs from those unusual places, a script host (`cmd`, `powershell`, `mshta`, `rundll32`...) is given something from there, a task under `\Microsoft\` runs a program outside Windows and Program Files, or a task is named like a known miner |
+| Services | an auto-start service outside the Windows system folders and Program Files that sits in those unusual places |
 | Persistence | Winlogon Shell/Userinit not default, IFEO debugger set, WMI event consumer present |
 | Network settings | custom `hosts` entries, system proxy or PAC script set |
 | Miner hiding spots | unknown files in `ProgramData\Microsoft\Windows\Caches`, hex-named folders (7-8 hex digits) in ProgramData/Windows/Caches |
@@ -43,6 +44,7 @@ The report starts with **FLAGS**: things worth a look. A flag is a hint, not a v
 
 It also lists, without flags: startup folders, folders in ProgramData that hold an exe, new files in `Windows\SystemTemp`, programs listening on all network interfaces, outbound connections by program and top memory users. The full scan adds up to 60 executables/scripts changed in the last 30 days; files under well-known apps (Steam, Discord, browsers, NVIDIA and similar) and cache folders are skipped there to keep the list short.
 Without admin everything runs except the Defender exclusion list.
+Under the flags the report says what they do **not** cover: `NOT CHECKED` (skipped: no admin, quick scan) and `COULD NOT READ` (a read failed, with the error). "none" means nothing stood out in the checks that ran. If the report file cannot be written, the results stay in `scan-report.txt.partial`.
 
 ## The stutter log (`disk-log.ps1`)
 
@@ -74,6 +76,7 @@ If nothing stands out and F9 marks show no frame hitch, the stutter is likely no
 ## Requirements and limits
 
 - Windows 10 or 11 with Windows PowerShell 5.1 (built in). Administrator rights for the Defender exclusion list and for frame times.
+- Regional formats with a decimal comma (Estonian, German, Finnish...) work since the version after 1.0.0; a `log.csv` recorded with 1.0.0 on such a Windows has shifted columns and cannot be repaired.
 - The stutter log uses English performance-counter names. Live logging was tested on Windows 11 with English counter names. On a Windows with translated counter names (for example German or French) it may stop with "Cannot read performance counters".
 - GPU temperature, clock and throttle need an NVIDIA GPU. Other GPUs leave those columns empty.
 - Loading screens in the middle of a session count as play. When loading takes about half of a short session, nothing is trimmed (the cut compares with the median frame rate).
@@ -88,7 +91,7 @@ powershell -ExecutionPolicy Bypass -File .\disk-log.ps1 -Summarize "$env:USERPRO
 
 ## Development
 
-- Tests: `Invoke-Pester tests` (Pester 3.4, the one that ships with Windows). The stutter-log verdicts run on synthetic logs in `tests/fixtures` (made by `tests/make-fixtures.ps1`). The scan has a smoke test that runs it on the real machine (about 1 minute).
+- Tests: `Invoke-Pester tests` (Pester 3.4, the one that ships with Windows). The stutter-log verdicts run on synthetic logs in `tests/fixtures` (made by `tests/make-fixtures.ps1`). The scan's rules (services, tasks, exclusions, file walk filters) have unit tests in `tests/scan-rules.Tests.ps1`: they load only the rule definitions from the script, nothing is scanned. A smoke test runs the real scan on the machine (about 1 minute).
 - CI on every push to `main` and every pull request: parse all scripts, PSScriptAnalyzer (errors), Pester, on `windows-latest` with Windows PowerShell 5.1.
 - Plan, known limits and ideas: [docs/NEXT.md](docs/NEXT.md).
 - Release: push a tag `vX.Y.Z` with a matching `## vX.Y.Z` section in `CHANGELOG.md`. CI builds `Scannx-vX.Y.Z.zip` with `tools/build-release.ps1` (which checks the PresentMon SHA256) and publishes it.

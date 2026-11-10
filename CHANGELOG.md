@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+Fixes from a full review of v1.0.0.
+
+- **Stutter log on a decimal-comma Windows** (Estonian, German, Finnish and similar regional formats): `log.csv` got extra columns and the summary gave a wrong verdict without any error. The logger now uses fixed number and time formats. Logs with times like `13.45.10` are still read. The minutes prompt accepts `0,5` and `0.5` everywhere.
+- **Scan, services**: only the real Windows system folders are trusted now. A service in `C:\Windows\Temp` used to be left out of the list, and a file named `Windows Defender.exe` in ProgramData was never flagged.
+- **Scan, scheduled tasks**: tasks under `\Microsoft\` are checked too (a common hiding place), and for script hosts (`cmd`, `powershell`, `mshta`, `rundll32`...) the arguments are checked, not only the program.
+- **Scan, Defender exclusions**: extension exclusions such as `exe` or `dll` are flagged as suspicious, the counts in the flag are right, and the 90-day history also shows added extension and IP exclusions.
+- **Scan, detections**: a recent Defender detection is flagged even when Defender gives no name for it.
+- **Scan, file walk**: a vendor name somewhere in the path (`GoogleUpdater.exe`, a folder named `Cache`) no longer hides a file. ProgramData is walked first, so the time budget cuts the least important folders.
+- **Scan, report**: the head now says what was not checked (`NOT CHECKED`, `COULD NOT READ`), so "none" is not read as a clean bill of health. If the report cannot be written, the `.partial` file is kept and the message says so instead of "Done".
+- Tests: unit tests for the scan's rules (`tests/scan-rules.Tests.ps1`) and for the regional formats.
+
 ## v1.0.0 - 2026-10-25
 
 First public release.
