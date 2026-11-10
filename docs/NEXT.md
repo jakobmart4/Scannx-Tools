@@ -12,6 +12,8 @@ Each step stays small and checkable: change, test, update this file and `CHANGEL
 
 ## Open from the review (next)
 
+Assigned in [docs/CODEX.md](CODEX.md): item 1 is task C1, items 2-4 are C4a, item 5 is C4b; the release ideas below are C3, the RivaTuner probes C5.
+
 1. **Tests for the stutter verdicts that have none** (in progress on a `codex/*` branch, see [docs/CODEX.md](CODEX.md)): DISK latency, GPU above 95 %, CPU above 90 %, the paging/DISK/CPU/GPU causes of an F9 mark, the two halves of the memory rule, the trimming rule, `summary.txt` itself, a log without a detected game.
 2. A log that runs across midnight gives a **wrong verdict** (the launch is not cut and memory gets the blame), not just missing rows. Fix: add 86400 s to the rows after the wrap.
 3. When the game process is not found, the verdict covers the idle desktop too and can say "no trouble visible". Say "game not found" in the verdict.
