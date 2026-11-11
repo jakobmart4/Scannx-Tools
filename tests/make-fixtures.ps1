@@ -11,10 +11,12 @@ function Build($case, $n, $f, $spikes, $mem, $new, $base = '10:00:00') {
   $d = Join-Path $Root $case; New-Item $d -ItemType Directory -Force | Out-Null
   $head = $h1; if ($mem) { $head += ',standbyMB,freeMB,pagefilePct' }; if ($new) { $head += ",$h3" }
   $rows = for ($i = 0; $i -lt $n; $i++) { $r = & $f $i; $t = ([datetime]"2000-01-01 $base").AddSeconds(2 * $i).ToString('HH:mm:ss')
-    $v = @($t, $r.cpu, 0, $r.avail, $r.commit, $r.pgIn, 0, 5000, 1, 0.1, $r.gpu, 3000, 1, 30, $r.game, $r.mark)
+    $gameOn = if ($r.ContainsKey('gameOn')) { $r.gameOn } else { 1 }
+    $latMs = if ($r.ContainsKey('latMs')) { $r.latMs } else { 0.2 }
+    $v = @($t, $r.cpu, 0, $r.avail, $r.commit, $r.pgIn, 0, 5000, 1, 0.1, $r.gpu, 3000, $gameOn, 30, $r.game, $r.mark)
     if ($mem) { $v += $r.standby, $r.free, $r.pf }
     if ($new) { $v += $r.mhz; $v += if ($i % 3 -eq 0) { $r.gw, $r.net, $r.temp, $r.clk, $r.thr } else { '', '', '', '', '' } }
-    ($v + @(0.2, 1, 0, 1, 0.2, 1, 0, 1)) -join ',' }
+    ($v + @(0.2, 1, 0, 1, $latMs, 1, 0, 1)) -join ',' }
   (@("$head,$h2") + $rows) | Set-Content (Join-Path $d 'log.csv') -Encoding utf8
   (@('Logging for 60 min (synthetic fixture).') + $spikes) | Set-Content (Join-Path $d 'events.txt') -Encoding utf8
 }
@@ -82,3 +84,51 @@ Build 'lateframes' 300 { param($i) Ok @{ mark = $(if ($i -eq 270) { 'MARK' } els
 Frames -case 'lateframes' -from 460000 -to 600000 -f { param($t) if ($t -eq 540000) { 400 } else { 100 } } -slow $false -shiftH 2
 Build 'midnight' 90 { param($i) Ok @{ mark = $(if ($i -eq 60) { 'MARK' } else { '' }) } } @() $true $true '21:58:01'
 Frames -case 'midnight' -from 0 -to 180000 -f { param($t) if ($t -ge 150000) { 500 } elseif ($t -eq 120000) { 400 } else { 50 } } -slow $false -shiftH 2 -base '21:58:00' -broken $true
+
+# The second disk is slow in three samples. Keep the first disk healthy.
+Build 'disk-slow' 12 { param($i)
+  if ($i -in 1, 3, 5) { Ok @{ latMs = 80 } } elseif ($i -eq 2) { Ok @{ latMs = 50 } } else { Ok @{} }
+} @()
+Build 'disk-edge' 12 { Ok @{ latMs = 50 } } @()
+
+# The final five rows are trimmed, leaving 100 valid samples. The two extra GPU readings
+# in gpu-near are old counter glitches. Counting them would take 2/100 above the 3% threshold.
+Build 'gpu-high' 105 { param($i) if ($i -lt 3) { Ok @{ gpu = 99 } } else { Ok @{} } } @()
+Build 'gpu-near' 107 { param($i)
+  if ($i -lt 2) { Ok @{ gpu = 99 } } elseif ($i -in 2, 3) { Ok @{ gpu = 101 } } elseif ($i -eq 4) { Ok @{ gpu = 95 } } else { Ok @{} }
+} @()
+Build 'cpu-high' 105 { param($i) if ($i -lt 3) { Ok @{ cpu = 95 } } else { Ok @{} } } @()
+Build 'cpu-near' 105 { param($i)
+  if ($i -lt 2) { Ok @{ cpu = 95 } } elseif ($i -eq 2) { Ok @{ cpu = 90 } } else { Ok @{} }
+} @()
+
+Build 'ram-low' 12 { Ok @{ avail = 900 } } @()
+Build 'ram-edge' 12 { Ok @{ avail = 1000 } } @()
+Build 'paging-high' 12 { Ok @{ pgIn = 60000 } } @()
+Build 'paging-edge' 12 { Ok @{ pgIn = 50000 } } @()
+Build 'commit-high' 12 { Ok @{ commit = 95 } } @()
+Build 'commit-near' 12 { Ok @{ commit = 94.9 } } @()
+
+Build 'trim-fall' 12 { param($i) Ok @{ avail = 1500; game = $(if ($i -lt 3) { 7000 } else { 4000 }) } } @()
+Build 'trim-rise' 12 { param($i) Ok @{ avail = 1500; game = $(if ($i -lt 3) { 2000 } else { 7000 }) } } @()
+Build 'trim-plenty' 12 { param($i) Ok @{ avail = 3000; game = $(if ($i -lt 3) { 7000 } else { 4000 }) } } @()
+Build 'trim-edge' 12 { param($i) Ok @{ avail = 1500; game = $(if ($i -lt 3) { 7000 } else { 5600 }) } } @()
+
+# Faults at rows 8, 24, 40 and 56. Each has one mark three rows away and two marks
+# four rows away, one on each side. The three-row marks alternate sides.
+Build 'mark-causes' 65 { param($i)
+  $r = Ok @{}
+  switch ($i) { 8 { $r.pgIn = 6000 } 24 { $r.latMs = 80 } 40 { $r.cpu = 95 } 56 { $r.gpu = 99 } }
+  if ($i -in 4, 5, 12, 20, 27, 28, 36, 37, 44, 52, 59, 60) { $r.mark = 'MARK' }
+  $r
+} @('10:00:16 SPIKE PAGING', '10:00:48 SPIKE DISK-LAT', '10:01:20 SPIKE CPU', '10:01:52 SPIKE GPU')
+
+Build 'no-game' 12 { Ok @{ gameOn = 0; game = 0 } } @()
+Build 'mid-game-start' 24 { param($i)
+  if ($i -lt 12) { Ok @{ gameOn = 0; game = 0; cpu = 99 } } else { Ok @{} }
+} @()
+
+# 196 frames at 5 ms plus a 2% tail. The 25 ms frame distinguishes the absolute hitch
+# floor from the relative threshold (3 x 5 ms) and checks that equality is excluded.
+Build 'fast-frames' 12 { Ok @{} } @()
+Frames 'fast-frames' 0 1065 { param($t) switch ($t) { 0 { 40 } 40 { 25 } 65 { 10 } 75 { 10 } default { 5 } } } $false

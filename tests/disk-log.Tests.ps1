@@ -135,3 +135,92 @@ Describe 'disk-log.ps1 -Summarize' {
     It 'does not report trimming' { $out | Should Not Match 'trimmed the game' }
   }
 }
+
+Describe 'isolated stutter verdicts' {
+  It 'counts three slow samples on the second disk and excludes exactly 50 ms' {
+    (Summarize 'disk-slow') | Should Match 'DISK 1 e: latency up to 80 ms \(3 samples over 50 ms\)'
+    $out = Summarize 'disk-edge'
+    $out | Should Match 'no memory, disk, GPU, CPU or network trouble visible'
+    $out | Should Not Match 'DISK .* latency up to'
+  }
+  It 'reports GPU load at three percent and ignores glitches above 100 percent' {
+    (Summarize 'gpu-high') | Should Match 'GPU above 95 % in 3 % of samples'
+    $out = Summarize 'gpu-near'
+    $out | Should Match '(?m)^gpuMaxPct [^\r\n]*max\s+99\.0\r?$'
+    $out | Should Match 'no memory, disk, GPU, CPU or network trouble visible'
+    $out | Should Not Match 'GPU above 95 %'
+  }
+  It 'reports CPU load at three percent but excludes two percent' {
+    (Summarize 'cpu-high') | Should Match 'CPU above 90 % in 3 % of samples'
+    $out = Summarize 'cpu-near'
+    $out | Should Match 'no memory, disk, GPU, CPU or network trouble visible'
+    $out | Should Not Match 'CPU above 90 %'
+  }
+  It 'reports low RAM alone below 1000 MB' {
+    (Summarize 'ram-low') | Should Match 'MEMORY pressure: free RAM min 900 MB, paging in up to 100/s'
+    $out = Summarize 'ram-edge'
+    $out | Should Match 'no memory, disk, GPU, CPU or network trouble visible'
+    $out | Should Not Match 'MEMORY pressure'
+  }
+  It 'reports paging alone above 50000 pages per second' {
+    (Summarize 'paging-high') | Should Match 'MEMORY pressure: free RAM min 4000 MB, paging in up to 60000/s'
+    $out = Summarize 'paging-edge'
+    $out | Should Match 'no memory, disk, GPU, CPU or network trouble visible'
+    $out | Should Not Match 'MEMORY pressure'
+  }
+  It 'reports commit at 95 percent but excludes 94.9 percent' {
+    (Summarize 'commit-high') | Should Match 'COMMIT charge reached 95 %'
+    $out = Summarize 'commit-near'
+    $out | Should Match 'no memory, disk, GPU, CPU or network trouble visible'
+    $out | Should Not Match 'COMMIT charge reached'
+  }
+  It 'reports a working-set fall after the peak only under low RAM and below 80 percent' {
+    (Summarize 'trim-fall') | Should Match "Windows trimmed the game's memory from 7000 to 4000 MB"
+    foreach ($case in 'trim-rise', 'trim-plenty', 'trim-edge') {
+      $out = Summarize $case
+      $out | Should Match 'no memory, disk, GPU, CPU or network trouble visible'
+      $out | Should Not Match "Windows trimmed the game's memory"
+    }
+  }
+}
+
+Describe 'F9 mark windows and event counts' {
+  $out = Summarize 'mark-causes'
+  It 'reports paging alone three rows after the mark' { $out | Should Match '(?m)^  10:00:10 .*->  RAM/paging\r?$' }
+  It 'reports disk latency three rows before the mark' { $out | Should Match '(?m)^  10:00:54 .*->  DISK\r?$' }
+  It 'reports CPU load three rows after the mark' { $out | Should Match '(?m)^  10:01:14 .*->  CPU\r?$' }
+  It 'reports GPU load three rows before the mark' { $out | Should Match '(?m)^  10:01:58 .*->  GPU\r?$' }
+  It 'ignores all four causes four rows before and after their marks' {
+    foreach ($t in '10:00:08', '10:00:24', '10:00:40', '10:00:56', '10:01:12', '10:01:28', '10:01:44', '10:02:00') {
+      $out | Should Match "(?m)^  $t .*->  RAM, disk, CPU, GPU and network all normal:"
+    }
+  }
+  It 'counts F9 marks and automatic spikes separately in the header' {
+    $out | Should Match '(?m)^summary [^\r\n]*\| marks \(F9\): 12 \| auto spikes: 4\r?$'
+  }
+}
+
+Describe 'summary file, game detection and fast frames' {
+  It 'writes the printed verdict to summary.txt' {
+    $dir = Join-Path $TestDrive 'saved-verdict'
+    Copy-Item (Join-Path $here 'fixtures\disk-slow') $dir -Recurse
+    $printed = & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Summarize $dir | Out-String
+    $saved = Get-Content -LiteralPath (Join-Path $dir 'summary.txt') -Raw -ErrorAction Stop
+    $pattern = '(?ms)^Verdict:\r?\n.*?(?=\r?\n\r?\n)'
+    $verdict = [regex]::Match($printed, $pattern).Value
+    $verdict | Should Match 'DISK 1 e: latency up to 80 ms'
+    [regex]::Match($saved, $pattern).Value | Should Be $verdict
+  }
+  It 'labels all rows when the game is absent' {
+    (Summarize 'no-game') | Should Match '(?m)^summary [^\r\n]*12 samples, 12 used \(game NOT detected: all rows\)'
+  }
+  It 'excludes pre-game CPU load when the game starts halfway through the log' {
+    $out = Summarize 'mid-game-start'
+    $out | Should Match '24 samples, 7 used \(game running, game start-up/exit skipped\)'
+    $out | Should Match '(?m)^cpu\s+min\s+60\.0\s+avg\s+60\.0\s+max\s+60\.0'
+    $out | Should Not Match 'CPU above 90 %'
+  }
+  It 'separates median and p99 at high frame rates and counts only the 40 ms hitch' {
+    (Summarize 'fast-frames') | Should Match 'frames\s+200 frames, avg 188 fps, median 5\.0 ms, p99 10\.0 ms, max 40\.0 ms, 1 hitches over 25 ms'
+  }
+}
