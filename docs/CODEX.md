@@ -24,7 +24,9 @@ One branch and one pull request per task. The file lanes do not overlap inside a
 | C4a | Stutter-log and launcher fixes with tests | `codex/disklog-fixes` | `disk-log.ps1`, `Scannx.cmd`, `tests/disk-log.Tests.ps1`, `tests/frameview.Tests.ps1`, `tests/make-fixtures.ps1`, `tests/fixtures/**` | 2 |
 | C4b | Smaller scan fixes with tests | `codex/scan-minor` | `scan-check.ps1`, `tests/scan-rules.Tests.ps1` | 2 |
 
-Wave 2 starts only when the owner says so: after C1 is merged (C4a edits the same test files) and after the C2 review has been read (its confirmed findings go into C4b). For wave 2 Claude hands `disk-log.ps1`, `Scannx.cmd` and `scan-check.ps1` over and does not touch them while the PR is open.
+**Status 2026-11-13:** C1 (#3), C2 (#1) and C3 (#2) are merged. C5 (#4) is open: raise the accepted shared-memory version to 2.21 as the acceptance comment says, then Claude does the live run. **Wave 2 can start**: C4a and C4b, in parallel (their file lanes do not overlap).
+
+Wave 2 starts only when the owner says so: after C1 is merged (C4a edits the same test files) and after the C2 review has been read (its confirmed findings go into C4a and C4b). For wave 2 Claude hands `disk-log.ps1`, `Scannx.cmd` and `scan-check.ps1` over and does not touch them while the PR is open.
 
 Never yours: `README.md`, `CHANGELOG.md`, `docs/NEXT.md`, `AGENTS.md`, this file. A change they need goes into the PR text as a proposal.
 

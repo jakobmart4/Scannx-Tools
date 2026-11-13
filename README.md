@@ -7,7 +7,7 @@ Plain Windows PowerShell 5.1 scripts: nothing to install, no data uploaded, no s
 
 ## Download and run
 
-1. Download `Scannx-<version>.zip` from [Releases](https://github.com/jakobmart4/Scannx-Tools/releases). Optional: compare its SHA256 with the `.sha256` file next to it.
+1. Download `Scannx-<version>.zip` from [Releases](https://github.com/jakobmart4/Scannx-Tools/releases). Optional: compare its SHA256 with the `.sha256` file next to it. From the version after 1.0.0, with the GitHub CLI you can also check that the zip was built by this repository's release workflow: `gh attestation verify Scannx-vX.Y.Z.zip --repo jakobmart4/Scannx-Tools` (use the version you downloaded).
 2. Right-click the zip, **Properties**, tick **Unblock**, OK. Then unzip it, for example to your Desktop.
 3. Double-click **`Scannx.cmd`** and allow administrator rights (UAC). Windows may show "Windows protected your PC" because the scripts are not code-signed: **More info**, **Run anyway**. The scripts are short plain text; read them first if you like.
 4. Pick from the menu:
@@ -93,9 +93,9 @@ powershell -ExecutionPolicy Bypass -File .\disk-log.ps1 -Summarize "$env:USERPRO
 ## Development
 
 - Tests: `Invoke-Pester tests` (Pester 3.4, the one that ships with Windows). The stutter-log verdicts run on synthetic logs in `tests/fixtures` (made by `tests/make-fixtures.ps1`). The scan's rules (services, tasks, exclusions, file walk filters) have unit tests in `tests/scan-rules.Tests.ps1`: they load only the rule definitions from the script, nothing is scanned. A smoke test runs the real scan on the machine (about 1 minute).
-- CI on every push to `main` and every pull request: parse all scripts, PSScriptAnalyzer (errors), Pester, on `windows-latest` with Windows PowerShell 5.1.
-- Plan, known limits and ideas: [docs/NEXT.md](docs/NEXT.md).
-- Release: push a tag `vX.Y.Z` with a matching `## vX.Y.Z` section in `CHANGELOG.md`. CI builds `Scannx-vX.Y.Z.zip` with `tools/build-release.ps1` (which checks the PresentMon SHA256) and publishes it.
+- CI on every push to `main` and every pull request: parse all scripts, PSScriptAnalyzer (errors, pinned version), Pester (including the release-package tests in `.github/tests`), on `windows-latest` with Windows PowerShell 5.1. Actions are pinned by commit; Dependabot proposes updates.
+- Plan, known limits and ideas: [docs/NEXT.md](docs/NEXT.md). Security reports: [SECURITY.md](SECURITY.md).
+- Release: push a tag `vX.Y.Z` with a matching, non-empty `## vX.Y.Z` section in `CHANGELOG.md` (checked first). CI builds `Scannx-vX.Y.Z.zip` with `tools/build-release.ps1` (which checks the PresentMon SHA256 and Intel's signature), attests its build provenance and publishes it.
 
 ## License
 
@@ -107,7 +107,7 @@ MIT, see [LICENSE](LICENSE). The release zip includes Intel PresentMon 2.3.1 ([G
 
 Scannx on Windowsi kontrollid kahele küsimusele: **kas arvutis peidab end midagi** ja **miks mäng hakib**. Skriptid ainult loevad: midagi ei paigaldata, andmeid ei laeta üles ega seadeid muudeta. Raportid lähevad Desktopile ja hakkimise logi pingib ruuterit ja 1.1.1.1.
 
-1. Lae [Releases](https://github.com/jakobmart4/Scannx-Tools/releases) alt `Scannx-<versioon>.zip`. Paremklõps, **Properties**, linnuke **Unblock** kasti, pakki lahti.
+1. Lae [Releases](https://github.com/jakobmart4/Scannx-Tools/releases) alt `Scannx-<versioon>.zip`. Paremklõps, **Properties**, linnuke **Unblock** kasti, pakki lahti. Soovi korral kontrolli, et zip on ehitatud selle repo release-töövoos: `gh attestation verify Scannx-vX.Y.Z.zip --repo jakobmart4/Scannx-Tools` (alates 1.0.0-le järgnevast versioonist).
 2. Topeltklõps **`Scannx.cmd`**, luba administraatori õigused. Kui Windows hoiatab ("Windows protected your PC"): **More info**, **Run anyway** (skriptid pole allkirjastatud).
 3. Kui salvestad mängu ajal ka **NVIDIA FrameView**'ga (Scroll Lock), võtab hakkimise logi selle kaadrilogi lõpus kaasa: PresentMoni puudumisel tulevad kaadriajad sealt, lisaks PC latentsus, kuvamata kaadrid ning CPU temperatuur ja võimsus. Päris FrameView logiga veel proovimata.
 4. Menüü: **1** täisskänn, **2** kiirskänn, **3** hakkimise logi (käivita **enne** mängu, hakkimisel vajuta **F9**; Ctrl+C lõpetab varem, siis vasta "Terminate batch job" küsimusele **N**), **4** vana logi kokkuvõte uuesti.

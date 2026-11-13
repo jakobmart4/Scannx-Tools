@@ -13,7 +13,9 @@ Fixes from a full review of v1.0.0.
 - **Scan, report**: the head now says what was not checked (`NOT CHECKED`, `COULD NOT READ`), so "none" is not read as a clean bill of health. If the report cannot be written, the `.partial` file is kept and the message says so instead of "Done".
 - **Stutter log, NVIDIA FrameView** (new): a FrameView per-frame log recorded during the run is copied into the run folder. Without PresentMon frame times the summary reads them from it and adds PC latency, dropped frames and FrameView's CPU/GPU sensors; `-FrameView <file>` picks it explicitly. Built from FrameView's documented columns, not yet tried on a real capture.
 - **Stutter log**: the frames line shows 1 % low and 0.1 % low fps.
-- Tests: unit tests for the scan's rules (`tests/scan-rules.Tests.ps1`) and for the regional formats.
+- Tests: unit tests for the scan's rules (`tests/scan-rules.Tests.ps1`) and for the regional formats; isolated tests with near misses for every stutter verdict that had none (disk, GPU, CPU, memory, commit, trimming, F9 causes, header counts, `summary.txt`, no game, a game started mid-log, high frame rates).
+- **Release**: the zip's build provenance is attested (`gh attestation verify`); zip entries use forward slashes; the `.sha256` file ends with a plain line feed (so `sha256sum -c` accepts it); the build checks Intel's signature on PresentMon; the `CHANGELOG.md` section is checked before anything is built; actions are pinned by commit, with Dependabot; `SECURITY.md`.
+- An independent review of the changes after v1.0.0 is in `docs/reviews/2026-11-codex.md`; its findings are scheduled for the next fixes.
 
 ## v1.0.0 - 2026-10-25
 
