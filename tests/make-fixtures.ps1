@@ -128,7 +128,62 @@ Build 'mid-game-start' 24 { param($i)
   if ($i -lt 12) { Ok @{ gameOn = 0; game = 0; cpu = 99 } } else { Ok @{} }
 } @()
 
-# 196 frames at 5 ms plus a 2% tail. The 25 ms frame distinguishes the absolute hitch
+# A 4 ms minimum, a 5 ms median and a 2% tail. The 25 ms frame distinguishes the absolute hitch
 # floor from the relative threshold (3 x 5 ms) and checks that equality is excluded.
 Build 'fast-frames' 12 { Ok @{} } @()
-Frames 'fast-frames' 0 1065 { param($t) switch ($t) { 0 { 40 } 40 { 25 } 65 { 10 } 75 { 10 } default { 5 } } } $false
+Frames 'fast-frames' 0 1064 { param($t) switch ($t) { 0 { 40 } 40 { 25 } 65 { 10 } 75 { 10 } 1060 { 4 } default { 5 } } } $false
+
+# The launch lasts 120 seconds and crosses midnight. Only the ten healthy play rows survive the exit cut.
+Build 'midnight-launch' 75 { param($i)
+  if ($i -lt 60) { Ok @{ game = 500; avail = 600; pgIn = 60000 } } else { Ok @{} }
+} @() $false $false '23:59:00'
+
+# One hitch after midnight next to an F9 mark before midnight. The optional FrameView capture
+# of the same session starts on the next date, for checking file-time alignment when PresentMon is absent.
+Build 'midnight-play' 16 { param($i) Ok @{ mark = $(if ($i -eq 4) { 'MARK' } else { '' }) } } @() $false $false '23:59:50'
+Frames -case 'midnight-play' -from 0 -to 20000 -f { param($t) if ($t -eq 11000) { 400 } else { 100 } } -slow $false -base '23:59:50'
+$fv = Join-Path $Root 'midnight-play\FrameView_game.exe_2000_01_02T000000_Log.csv'
+@('Application,SwapChainAddress,TimeInSeconds,MsBetweenPresents'
+  for ($ms = 0; $ms -lt 10000; ) {
+    $dt = if ($ms -eq 1000) { 400 } else { 100 }
+    'game.exe,0x1,{0},{1}' -f ($ms / 1000).ToString([Globalization.CultureInfo]::InvariantCulture), $dt
+    $ms += $dt
+  }
+) | Set-Content $fv -Encoding utf8
+
+foreach ($losses in 1, 2, 3) {
+  Build "ping-loss-$losses" 20 { param($i)
+    Ok @{ net = $(if ($i -lt 3 * $losses) { -1 } else { 6 }) }
+  } @() $true $true
+}
+Build 'all-game-rows-cut' 12 { param($i)
+  if ($i -lt 5) { Ok @{ gameOn = 0; game = 0; cpu = 99 } } else { Ok @{ game = 150 } }
+} @()
+Build 'mark-edges' 14 { param($i)
+  if ($i -eq 6) { Ok @{ latMs = 50; cpu = 90; gpu = 95; pgIn = 5000; mark = 'MARK' } }
+  elseif ($i -eq 8) { Ok @{ gpu = 101 } } else { Ok @{} }
+} @()
+
+# The filename and Application column intentionally disagree. The second app reuses the
+# game's swap-chain address and wins by raw frame count, but most of its frames precede gameplay.
+Build 'fv-apps' 22 { param($i)
+  if ($i -lt 6) { Ok @{ gameOn = 0; game = 0 } } else { Ok @{} }
+} @()
+function CaptureRows($case, $file, $app, $chain, $seconds, $count, $duration) {
+  $path = Join-Path $Root "$case\$file"
+  @('Application,SwapChainAddress,TimeInSeconds,MsBetweenPresents,MsPCLatency'
+    for ($i = 0; $i -lt $count; $i++) {
+      $time = ($seconds + $i * $duration / 1000).ToString([Globalization.CultureInfo]::InvariantCulture)
+      '{0},{1},{2},{3},30' -f $app, $chain, $time, $duration
+    }
+  ) | Set-Content -LiteralPath $path -Encoding utf8
+}
+CaptureRows 'fv-apps' 'FrameView_first.exe_2000_01_01T100000_Log.csv' 'Arena.exe' '0x1' 12 25 20
+CaptureRows 'fv-apps' 'FrameView_Arena.exe_2000_01_01T100000_Log.csv' 'Overlay.exe' '0x1' 0 400 25
+CaptureRows 'fv-apps' 'FrameView_Arena.exe_2000_01_01T100013_Log.csv' '' '0x2' 0 15 20
+CaptureRows 'fv-apps' 'FrameView_Studio.exe_2000_01_01T100013_Log.csv' 'Studio.exe' '0x7' 0 30 15
+$studio = Join-Path $Root 'fv-apps\FrameView_Studio.exe_2000_01_01T100013_Log.csv'
+$secondChain = for ($i = 0; $i -lt 16; $i++) {
+  'Studio.exe,0x8,{0},10,30' -f ($i / 100).ToString([Globalization.CultureInfo]::InvariantCulture)
+}
+$secondChain | Add-Content -LiteralPath $studio -Encoding utf8
