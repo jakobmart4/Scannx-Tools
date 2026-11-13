@@ -1,0 +1,5 @@
+﻿Logging for 60 min (synthetic fixture).
+10:00:16 SPIKE PAGING
+10:00:48 SPIKE DISK-LAT
+10:01:20 SPIKE CPU
+10:01:52 SPIKE GPU
