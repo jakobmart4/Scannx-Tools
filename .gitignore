@@ -1,14 +1,56 @@
-# reports and logs contain file paths and user names: never commit them
+# Scannx output: reports and logs contain file paths, user names and measurements of a PC. Never commit them.
 scan-report*.txt
 *.partial
 disk-log/
 run-*/
+summary.txt
+events.txt
+presentmon-err.txt
 *.csv
-!tests/fixtures/**/*.csv
+*.etl
 *.reg
-*.zip
+*.log
+!tests/fixtures/**/*.csv
+!tests/fixtures/**/events.txt
+
 # release build output and the PresentMon download (shipped in the release zip, not in git)
 dist/
+*.zip
+*.sha256
 PresentMon-*.exe
 PresentMon-LICENSE.txt
 notes.md
+
+# AI agents' local files. The shared rules (AGENTS.md, docs/CODEX.md) are committed on purpose.
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.codex/
+AGENTS.override.md
+.ua/
+
+# test runs, mutation copies and scratch work
+TestResults*.xml
+*-results.xml
+*.patch
+*.orig
+*.rej
+__pycache__/
+scratch/
+tmp/
+
+# one person's PC: notes, cleanup scripts, keys and signing certificates
+personal/
+.env
+*.pfx
+*.p12
+*.key
+*.pem
+
+# editors and Windows
+.vscode/
+.idea/
+.obsidian/
+Thumbs.db
+desktop.ini
+*.lnk
