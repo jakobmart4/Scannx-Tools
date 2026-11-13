@@ -21,7 +21,7 @@ One branch and one pull request per task. The file lanes do not overlap inside a
 | C2 | Independent review of the changes after v1.0.0 | `codex/review-v1.0.1` | only the new file `docs/reviews/2026-11-codex.md` | 1 |
 | C3 | Release trust chain | `codex/release-trust` | `.github/**`, `tools/build-release.ps1`, `SECURITY.md` | 1 |
 | C5 | RivaTuner Statistics Server probes (code only) | `codex/rtss-probes` | `experiments/**` (new folder) | 1 |
-| C4a | Stutter-log and launcher fixes with tests | `codex/disklog-fixes` | `disk-log.ps1`, `Scannx.cmd`, `tests/disk-log.Tests.ps1`, `tests/make-fixtures.ps1`, `tests/fixtures/**` | 2 |
+| C4a | Stutter-log and launcher fixes with tests | `codex/disklog-fixes` | `disk-log.ps1`, `Scannx.cmd`, `tests/disk-log.Tests.ps1`, `tests/frameview.Tests.ps1`, `tests/make-fixtures.ps1`, `tests/fixtures/**` | 2 |
 | C4b | Smaller scan fixes with tests | `codex/scan-minor` | `scan-check.ps1`, `tests/scan-rules.Tests.ps1` | 2 |
 
 Wave 2 starts only when the owner says so: after C1 is merged (C4a edits the same test files) and after the C2 review has been read (its confirmed findings go into C4b). For wave 2 Claude hands `disk-log.ps1`, `Scannx.cmd` and `scan-check.ps1` over and does not touch them while the PR is open.
@@ -114,6 +114,17 @@ Each with its fixture and test, in the style of C1.
 3. **NETWORK from one lost ping**: `$lossPct -ge 1` fires on a single lost ping in a short log. Require at least 3 lost pings as well.
 4. **Launcher** (`Scannx.cmd`): when `scan-check.ps1` is not next to it (started from inside the zip), print "unzip first" and pause; call `fltmc` and `powershell` by full path under `%SystemRoot%\System32`. Keep the file CRLF. No test harness exists for the launcher: describe exactly what you changed and leave it under "Not verified".
 
+From the C2 review (`docs/reviews/2026-11-codex.md`, all reproduced on Windows; tests go into `tests/frameview.Tests.ps1`):
+
+5. **An unusable `frames.csv` blocks FrameView** (review finding 1): an empty or header-only `frames.csv` (PresentMon was blocked) selects the PresentMon branch by `Test-Path` alone, so a valid FrameView log next to it is never read and the summary says "next step: PresentMon". Read PresentMon first; when it gives no frames and FrameView logs exist, read those. Tests: an empty and a header-only `frames.csv`, each next to a valid FrameView log.
+6. **FrameView logs of other applications** (finding 2): every `FrameView_*_Log.csv` in the run folder is read and the swap chain with the most frames wins, so the verdict can come from another program; the same swap chain address in two files mixes their frames. Key the frames by application (the `Application` column, or the exe in the file name) plus swap chain. When a `-Game` name matches an application, use only that one; otherwise take the application with the most frames inside the time span of the log's game rows. Name the application in the `frame source` line. The copy at the end of a live run takes only the logs of the logged game when one of its names matches. Tests: a second application with more frames; the same swap chain address in both files; two captures of the same game (they must still combine).
+7. **Quoted CSV fields** (finding 8): `Split(',')` shifts the columns when a field holds a quoted comma (`"Game, Deluxe"`); with a full header the summary then shows plausible but wrong numbers. Split with quotes respected (a doubled quote inside a quoted field is one quote). Tests: a quoted comma and a doubled quote in the application name; the numbers must equal the unquoted case.
+
+Left over from the acceptance of C1 (tests only):
+
+8. The two surviving mutants: `fast-frames` needs one frame faster than the median, so that `$fMed = $srt[0]` fails a test; add a fixture with game rows where every row is cut from the used rows (game memory under 200 MB throughout), so that `$use = @($rows)` fails one.
+9. F9 mark causes at their edges: disk exactly 50 ms, cpu exactly 90 %, gpu exactly 95 %, paging exactly 5000 pages/s must **not** give the cause; a GPU value over 100 inside the mark window (counter glitch) must be ignored.
+
 ## C4b (wave 2): smaller scan fixes
 
 Each as a small pure function or regex variable with tests in `tests/scan-rules.Tests.ps1`.
@@ -126,4 +137,11 @@ Each as a small pure function or regex variable with tests in `tests/scan-rules.
 6. Winlogon `Userinit`: accept any drive letter of the Windows folder, not only `C:`.
 7. Policy exclusions: read `HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions` without admin too (it is readable); only `Get-MpPreference`'s list needs admin.
 8. Desktop and Downloads: use the real folders (`[Environment]::GetFolderPath('Desktop')`; Downloads from `HKCU\...\Explorer\User Shell Folders`, value `{374DE290-123F-4565-9164-39C4925E467B}`), not `%USERPROFILE%\Desktop`.
-9. The findings from the C2 review that the owner confirms; they will be listed in the PR that starts this task.
+
+From the C2 review (`docs/reviews/2026-11-codex.md`, all reproduced on Windows; confirmed by the owner):
+
+9. **`Finish` says "Done" for half a report** (finding 3): when `Out-File` writes part of the output and then throws, the `catch` swallows the error, the file is non-empty and fresh, so `.partial` is removed and "Done" is printed. Remember the failure in the `catch` and keep `.partial` unless the write succeeded. Test: a write that leaves a non-empty file and then fails (mock `Out-File`).
+10. **File walk drops unreadable folders silently** (finding 4): a folder is popped before it is read; access denied or any other error is swallowed by an empty `catch`, so the report says "left unvisited: 0" and nothing appears under `COULD NOT READ`. Count those folders, keep the first few names, and print one line in the file-walk section plus one entry in the report head (one line with the count, not one per folder: an ordinary PC has several). Move the loop body into a small function so that a test can feed it a folder that throws.
+11. **The Defender folder exempts any file** (finding 5; minor, writing there needs admin): `TaskOdd` returns early for anything under `ProgramData\Microsoft\Windows Defender\` and `$sysSvc` trusts the whole folder. Limit the exemption to Defender's own programs under `Platform\<version>\` (for example `MsMpEng.exe`, `MpCmdRun.exe`, `NisSrv.exe`); take the full list from Microsoft's documentation and say in the PR where it comes from. Tests: `evil.exe` there is flagged as a task and as a service; the real names are not.
+12. **Miner task names under `\Microsoft\`** (finding 6): the name check sits in the `elseif` and is skipped for every task under `\Microsoft\`. Check the name for all tasks.
+13. **`$odd` matches a file name** (finding 7): the unanchored `ProgramData` flags `C:\Program Files\Vendor\ProgramDataHelper.exe`. Anchor it to the folder (`^"?[A-Z]:\\ProgramData\\`); keep `\Temp\` and `\Users\Public` as folder parts. `$odd` is also used for autostart entries and for script-host arguments, where the path is not at the start of the string: keep those working (a path inside an argument string must still match) and cover both uses with tests.
