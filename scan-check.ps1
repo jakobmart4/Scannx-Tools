@@ -1,5 +1,5 @@
 # Read-only malware / health check. Changes nothing.
-# Report: Desktop\scan-report.txt (FLAGS first, then details). Works without admin; admin adds the Defender exclusion list + policy exclusions.
+# Report: Desktop\scan-report.txt (FLAGS first, then details). Works without admin; admin adds the Defender exclusion list.
 # -Fast skips the file walk (~1 min). -BudgetSec caps the walk (default 120 s) so it can never hang for 25 min.
 param([string]$Out = (Join-Path ([Environment]::GetFolderPath('Desktop')) 'scan-report.txt'), [switch]$Fast, [int]$BudgetSec = 120)
 $ErrorActionPreference = 'SilentlyContinue'
@@ -12,8 +12,20 @@ $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIden
 function Flag($t) { $flags.Add($t) }
 function S($t) { Write-Host "[$((Get-Date).ToString('HH:mm:ss'))] $t"; Add-Content $part "`r`n=== $t ===" -Encoding utf8 }
 function L($x) { if ($x) { Add-Content $part (($x | Out-String -Width 250).TrimEnd()) -Encoding utf8 } }
-function ExeOf($v) { if ($v -match '^\s*"([^"]+)"') { $Matches[1] } elseif ($v -match '^\s*(.+?\.(exe|bat|cmd|vbs|ps1|lnk|scr))') { $Matches[1] } else { ($v -split ' ')[0] } }
-$odd = 'ProgramData|\\Temp\\|\\Users\\Public'                      # places legit autostarts rarely live
+function ExeOf($v) {
+  $v = [Environment]::ExpandEnvironmentVariables("$v")
+  $exe = if ($v -match '^\s*"([^"]+)"') { $Matches[1] } elseif ($v -match '^\s*(.+?\.(exe|bat|cmd|vbs|ps1|lnk|scr))') { $Matches[1] } else { ($v.Trim() -split ' ')[0] }
+  if ($exe -and $exe -notmatch '[\\/:]') { $command = Get-Command -Name $exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($command) { $exe = $command.Source } }
+  $exe
+}
+$odd = '^"?[A-Z]:\\ProgramData\\|\\Temp\\|\\Users\\Public(\\|$)'   # actual folders, not a file named ProgramDataHelper.exe
+$oddArg = '[A-Z]:\\ProgramData\\|\\Temp\\|\\Users\\Public(\\|$)'   # an absolute path may appear anywhere inside shell arguments
+function StartupValues($properties) { $properties | Where-Object { $_.Name -notin 'PSPath','PSParentPath','PSChildName','PSDrive','PSProvider' } }
+function AutostartInfo($value) {
+  $exe = ExeOf $value; $network = $exe -match '^[\\/]{2}'
+  $missing = if ($network) { $false } else { -not (Test-Path -LiteralPath $exe) }
+  [pscustomobject]@{ Exe=$exe; Network=$network; Missing=$missing; Odd=([Environment]::ExpandEnvironmentVariables("$value") -match $oddArg -or $exe -match $odd) }
+}
 function N($x) { @($x | Where-Object { $_ }).Count }               # @($null).Count is 1 in PS 5.1
 # TryRead 'name' { read }: (not "Rd": rd is an alias of Remove-Item and aliases win over functions) runs a key read and notes it when it failed. An empty result alone would look the same as "nothing found".
 function TryRead($what, [scriptblock]$read) {
@@ -21,24 +33,25 @@ function TryRead($what, [scriptblock]$read) {
   if ($Error.Count -and "$($Error[0].FullyQualifiedErrorId)" -notmatch 'NoMatchingEventsFound') { $unread.Add("$what ($(("$($Error[0].Exception.Message)" -replace '\s+', ' ').Trim()))") }
   $r
 }
-$defDir = '^"?[A-Z]:\\ProgramData\\Microsoft\\Windows Defender\\'
+# Exact Platform binaries from Microsoft's connectivity documentation, not a blanket folder exemption.
+$defDir = '^"?[A-Z]:\\ProgramData\\Microsoft\\Windows Defender\\Platform\\\d+(?:\.\d+)+(?:-\d+)?\\(MsMpEng|NisSrv|ConfigSecurityPolicy|MpCopyAccelerator|MpCmdRun|MpDefenderCoreService|mpextms|MpDlpService|MpDlpCmd|MipDlp|DlpUserAgent)\.exe(?="?(\s|$))'
 # script hosts: for these the arguments say what really runs
 $lolbin = '(^|\\)(cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|msiexec|conhost|forfiles)(\.exe)?$'
 $sysExe = '^[A-Z]:\\Windows\\|^[A-Z]:\\Program Files( \(x86\))?\\'
 # Why a task is suspicious, or nothing. Tasks under \Microsoft\ are checked too: malware hides there, the folder name proves nothing.
 function TaskOdd($tpath, $name, $exe, $arg) {
   $e = [Environment]::ExpandEnvironmentVariables("$exe").Trim('"'); $a = [Environment]::ExpandEnvironmentVariables("$arg")
+  if ($name -match 'System Health|Windows System|RuntimeHost') { return 'is named like a known miner task' }
   if ($e -match $defDir) { return }
   if ($e -match $odd) { return 'runs from an unusual place' }
-  if ($e -match $lolbin -and $a -match $odd) { return 'a script host runs something from an unusual place' }
+  if ($e -match $lolbin -and $a -match $oddArg) { return 'a script host runs something from an unusual place' }
   if ($tpath -match '^\\Microsoft\\') { if ($e -match '^[A-Z]:\\' -and $e -notmatch $sysExe) { return 'sits under \Microsoft\ but runs a program outside Windows and Program Files' } }
-  elseif ($name -match 'System Health|Windows System|RuntimeHost') { return 'is named like a known miner task' }
 }
 # services left out of the list. Only real system folders: "C:\Windows\" at any depth also hid Windows\Temp, and an unanchored
 # 'Windows\' hid C:\ProgramData\Microsoft\Windows\..., both miner hiding spots
-$sysSvc = '^"?[A-Z]:\\Windows\\(System32|SysWOW64|servicing|Microsoft\.NET|WinSxS)\\|^"?[A-Z]:\\Program Files( \(x86\))?\\|^"?[A-Z]:\\ProgramData\\Microsoft\\Windows Defender\\|^\\SystemRoot\\(System32|SysWOW64)\\'
+$sysSvc = '^"?[A-Z]:\\Windows\\(System32|SysWOW64|servicing|Microsoft\.NET|WinSxS)\\|^"?[A-Z]:\\Program Files( \(x86\))?\\|^\\SystemRoot\\(System32|SysWOW64)\\' + '|' + $defDir
 function SvcOdd($path) { $path -notmatch $sysSvc -and $path -match $odd }
-$badEx = 'Temp\\?$|^[A-Z]:\\?$|^C:\\Program Files( \(x86\))?\\?$|ProgramData\\Microsoft\\Windows\\?$|\\Windows\\Caches|\\[0-9A-F]{7,8}(\\|$)|RuntimeHost|proxies-peer|miner|Framework(64)?\\v4|AppData\\(Local|Roaming)\\?$'
+$badEx = 'Temp\\?$|^[A-Z]:\\?$|^C:\\Program Files( \(x86\))?\\?$|ProgramData\\Microsoft\\Windows\\?$|\\Windows\\Caches|\\(?-i:(?=[0-9A-F]{7,8}(\\|$))(?=[0-9]*[A-F])[0-9A-F]{7,8})(\\|$)|RuntimeHost|proxies-peer|\bminer\b|Framework(64)?\\v4|AppData\\(Local|Roaming)\\?$'
 $badExt = '^\.?(exe|dll|sys|scr|com|msi|ps1|bat|cmd|vbs|js)$'      # an extension exclusion like this switches Defender off for all programs
 function BadExclusions($paths, $procs, $exts) {
   @(@($paths) + @($procs) | Where-Object { $_ -and $_ -match $badEx }) + @(@($exts) | Where-Object { $_ -and $_ -match $badExt } | ForEach-Object { "*.$("$_".TrimStart('.'))" })
@@ -46,10 +59,65 @@ function BadExclusions($paths, $procs, $exts) {
 function ThreatNames($det, $names) { @($det | ForEach-Object { if ($names[$_.ThreatID]) { $names[$_.ThreatID] } else { "unknown threat ID $($_.ThreatID)" } } | Select-Object -Unique) }
 # Writes the report. The .partial file is the only copy of the results until then, so it goes only when the report is really there.
 function Finish($head, $part, $Out, $t0, $nFlags) {
-  try { $head + (Get-Content $part) | Out-File $Out -Encoding utf8 -ErrorAction Stop } catch { }
+  $written = $false
+  try { $head + (Get-Content $part) | Out-File $Out -Encoding utf8 -ErrorAction Stop; $written = $true } catch { }
   $f = Get-Item -LiteralPath $Out
-  if ($f -and -not $f.PSIsContainer -and $f.Length -gt 0 -and $f.LastWriteTime -ge $t0) { Remove-Item $part; "Done: $Out ($nFlags flags). Read the report before you share it: it contains file paths and your user name." }
+  if ($written -and $f -and -not $f.PSIsContainer -and $f.Length -gt 0 -and $f.LastWriteTime -ge $t0) { Remove-Item $part; "Done: $Out ($nFlags flags). Read the report before you share it: it contains file paths and your user name." }
   else { "Could NOT write $Out (locked, no access or disk full). The results are in $part" }
+}
+
+$risky = '\b(TeamViewer|AnyDesk|RDP ?Wrapper|Cheat Engine|KMS|KMSAuto|KMSpico|Xeno|Solara|Internet Download Manager|BitTorrent|uTorrent|Crack)\b'
+$crackName = '\b(crack|keygen|kmspico|kmsauto|activator|repack|xeno|solara|executor)\b'
+function RiskySoftware($entries) { $entries | Where-Object { $_.PSChildName -notmatch '^Steam App \d+$' -and $_.DisplayName -match $risky } }
+function HardwareErrors($events) { $events | Where-Object { $_.Level -in 1,2 -and $_.ProviderName -match 'disk|Ntfs|stornvme|storahci|WHEA' } }
+$userinit = '^[A-Z]:\\Windows\\system32\\userinit\.exe,?$'
+function PolicyExclusions {
+  'Paths','Processes','Extensions','IpAddresses' | ForEach-Object {
+    $key = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions\$_"
+    if (Test-Path -LiteralPath $key) { [pscustomobject]@{ Kind=$_; Values=(Get-Item -LiteralPath $key).ValueCount } }
+  } | Where-Object Values
+}
+function UserFolders($desktop, $shellFolders) {
+  $downloads = "$($shellFolders.'{374DE290-123F-4565-9164-39C4925E467B}')"
+  @($desktop, [Environment]::ExpandEnvironmentVariables($downloads)) | Where-Object { $_ } | Select-Object -Unique
+}
+# The narrow IO seam lets tests throw during enumeration without touching real folders.
+function WalkRead($kind, $path) {
+  switch ($kind) {
+    'files' { [IO.Directory]::EnumerateFiles($path) }
+    'directories' { [IO.Directory]::EnumerateDirectories($path) }
+    'attributes' { [IO.File]::GetAttributes($path) }
+    'modified' { [IO.File]::GetLastWriteTime($path) }
+  }
+}
+function WalkFolder($directory, $cut, $stack) {
+  $hits = New-Object Collections.Generic.List[string]; $newx = New-Object Collections.Generic.List[string]
+  $failed = New-Object Collections.Generic.List[string]
+  try {
+    WalkRead 'files' $directory | ForEach-Object {
+      $file = $_; $name = [IO.Path]::GetFileName($file)
+      if ($name -match $mark) { $hits.Add($file) }
+      elseif ($name -match '\.(exe|bat|cmd|ps1|vbs|scr)$' -and (WalkRead 'modified' $file) -gt $cut -and $file -notmatch $trusted) { $newx.Add("$((WalkRead 'modified' $file).ToString('yyyy-MM-dd')) $file") }
+    }
+    WalkRead 'directories' $directory | ForEach-Object {
+      $child = $_
+      try {
+        $name = [IO.Path]::GetFileName($child)
+        if ($name -match $mark) { $hits.Add($child) }
+        if (-not ((WalkRead 'attributes' $child) -band [IO.FileAttributes]::ReparsePoint)) {
+          if ($child -match $prune) { WalkRead 'files' $child | ForEach-Object { if ([IO.Path]::GetFileName($_) -match $mark) { $hits.Add($_) } } }
+          else { $stack.Push($child) }
+        }
+      } catch { $failed.Add($child) }
+    }
+  } catch { $failed.Add($directory) }
+  [pscustomobject]@{ Hits=$hits; New=$newx; Failed=$failed }
+}
+function ReportWalkFailures($count, $samples) {
+  if ($count) {
+    $summary = "file walk could not read $count folders (first: $($samples -join ' | '))"
+    L $summary; $unread.Add($summary)
+  }
 }
 
 S 'Info'; L "$(Get-Date) | boot: $((Get-CimInstance Win32_OperatingSystem).LastBootUpTime) | admin: $isAdmin | fast: $Fast | PS $($PSVersionTable.PSVersion)"
@@ -67,13 +135,13 @@ if ($st) {
 }
 if ($isAdmin -and "$($p.ExclusionPath)" -notmatch 'N/A') {
   L "Exclusions  Paths: $($p.ExclusionPath -join '; ') | Procs: $($p.ExclusionProcess -join '; ') | Ext: $($p.ExclusionExtension -join '; ')"
-  # malware likes to plant exclusions as POLICY (HKLM\SOFTWARE\Policies\...): Remove-MpPreference can't remove those, the registry keys must go
-  $pol = 'Paths','Processes','Extensions','IpAddresses' | ForEach-Object { $k = "HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions\$_"; if (Test-Path $k) { [pscustomobject]@{Kind=$_; Values=(Get-Item $k).ValueCount} } } | Where-Object Values
-  if ($pol) { L ("Policy exclusions: " + (($pol | ForEach-Object { "$($_.Kind)=$($_.Values)" }) -join ', ')); Flag "Defender exclusions set by POLICY ($(($pol | ForEach-Object { "$($_.Kind)=$($_.Values)" }) -join ', ')): not normal on a home PC, malware trick (HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions)" }
   $sus = @(BadExclusions $p.ExclusionPath $p.ExclusionProcess $p.ExclusionExtension)
   if ($sus.Count) { Flag "Suspicious Defender exclusions: $($sus.Count) (e.g. $(($sus | Select -First 3) -join ' | '))" }
   elseif ($p.ExclusionPath -or $p.ExclusionProcess -or $p.ExclusionExtension) { Flag "Defender has $(N $p.ExclusionPath) path / $(N $p.ExclusionProcess) process / $(N $p.ExclusionExtension) extension exclusions (look reasonable; check they are yours)" }
 } else { L 'Exclusions: NOT VISIBLE - run as administrator to see them' }
+# Policy keys are readable without elevation, independently of Get-MpPreference's list.
+$pol = @(TryRead 'Defender policy exclusions' { PolicyExclusions })
+if ($pol) { L ("Policy exclusions: " + (($pol | ForEach-Object { "$($_.Kind)=$($_.Values)" }) -join ', ')); Flag "Defender exclusions set by POLICY ($(($pol | ForEach-Object { "$($_.Kind)=$($_.Values)" }) -join ', ')): not normal on a home PC, malware trick (HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Exclusions)" }
 # event 5007 is readable without admin: shows exclusions ADDED in the last 90 d (malware planted its list in bursts)
 $add = TryRead 'Defender event log (exclusions added)' { Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational';Id=5007;StartTime=(Get-Date).AddDays(-90)} -MaxEvents 5000 } | Where-Object { ($_.Message -replace '\s+',' ') -match 'Old value: New value: HKLM.*?Exclusions\\(Paths|Processes|Extensions|IpAddresses)' }
 L '-- exclusions ADDED (event 5007, 90 d)'; L ($add | Group-Object { $_.TimeCreated.ToString('yyyy-MM-dd HH:mm') } | Sort Name | Select Name,Count | Format-Table -AutoSize)
@@ -90,11 +158,12 @@ $sa = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\
 function State($n) { foreach ($k in $sa) { $b = (Get-ItemProperty $k).$n; if ($b -is [byte[]] -and ($b[0] -band 1)) { return 'disabled' } }; 'ENABLED' }
 foreach ($k in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run','HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce','HKLM:\Software\Microsoft\Windows\CurrentVersion\Run','HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run') {
   L "-- $k"
-  (Get-ItemProperty $k).PSObject.Properties | Where-Object Name -notmatch '^PS' | ForEach-Object {
-    $s = State $_.Name; $exe = ExeOf $_.Value; $miss = -not (Test-Path -LiteralPath $exe)
+  StartupValues (Get-ItemProperty $k).PSObject.Properties | ForEach-Object {
+    $s = State $_.Name; $info = AutostartInfo $_.Value; $exe = $info.Exe; $miss = $info.Missing
     L ("[{0}]{1} {2} = {3}" -f $s, $(if ($miss) { ' [FILE MISSING]' } else { '' }), $_.Name, $_.Value)
     if ($s -eq 'ENABLED' -and $miss) { Flag "Autostart points to missing file: $($_.Name) -> $exe" }
-    if ($s -eq 'ENABLED' -and $exe -match $odd) { Flag "Autostart in unusual place: $($_.Name) -> $exe" }
+    if ($s -eq 'ENABLED' -and $info.Network) { Flag "Autostart points to a network path: $($_.Name) -> $exe" }
+    if ($s -eq 'ENABLED' -and $info.Odd) { Flag "Autostart in unusual place: $($_.Name) -> $($_.Value)" }
   }
 }
 S 'Startup folders'; L (Get-ChildItem "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup","$env:ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp" -Force | Where-Object Name -ne 'desktop.ini' | Select FullName,LastWriteTime | Format-Table -AutoSize)
@@ -108,7 +177,7 @@ L (TryRead 'services' { Get-CimInstance Win32_Service } | Where-Object { $_.Star
 
 S 'Persistence extras'
 $w = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon'; L "Winlogon Shell=$($w.Shell) Userinit=$($w.Userinit)"
-if ($w.Shell -ne 'explorer.exe' -or $w.Userinit -notmatch '^C:\\Windows\\system32\\userinit\.exe,?$') { Flag 'Winlogon Shell/Userinit is not default' }
+if ($w.Shell -ne 'explorer.exe' -or $w.Userinit -notmatch $userinit) { Flag 'Winlogon Shell/Userinit is not default' }
 Get-ChildItem 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Image File Execution Options' | Where-Object { (Get-ItemProperty $_.PSPath).Debugger } | ForEach-Object { Flag "IFEO debugger set for $($_.PSChildName)"; L "IFEO: $($_.PSChildName)" }
 $wmi = TryRead 'WMI event consumers' { Get-CimInstance -Namespace root\subscription -ClassName __EventConsumer } | Where-Object Name -ne 'SCM Event Log Consumer'; if ($wmi) { Flag 'WMI event consumer present'; L ($wmi | Select Name,__CLASS | Format-Table) }
 $h = Get-Content "$env:SystemRoot\System32\drivers\etc\hosts" | Where-Object { $_ -and $_ -notmatch '^\s*#' }; L '-- hosts'; L $h
@@ -139,14 +208,14 @@ S 'Top memory (by process name)'; L (Get-Process | Group-Object Name | ForEach-O
 S 'System log (14 d): disk / NTFS / hardware errors'
 $ev = TryRead 'System event log' { Get-WinEvent -FilterHashtable @{LogName='System';StartTime=(Get-Date).AddDays(-14);Level=1,2,3;ProviderName='disk','Ntfs','stornvme','storahci','Microsoft-Windows-WHEA-Logger','Microsoft-Windows-Kernel-Power'} }
 L ($ev | Group-Object ProviderName,Id | Sort Count -Descending | Select -First 10 Count,Name | Format-Table -AutoSize)
-if ($ev | Where-Object { $_.ProviderName -match 'disk|Ntfs|stornvme|storahci|WHEA' }) { Flag 'Disk/NTFS/hardware errors in System log (14 d)' }
+if (HardwareErrors $ev) { Flag 'Disk/NTFS/hardware errors in System log (14 d)' }
 
 S 'Installed software worth a second look'
-$risky = 'TeamViewer|AnyDesk|RDP ?Wrapper|Cheat Engine|KMS|Xeno|Solara|Internet Download Manager|\bBitTorrent|uTorrent|Crack'
-$sw = Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object DisplayName -match $risky | Select DisplayName,DisplayVersion
+$sw = RiskySoftware (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*','HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*') | Select DisplayName,DisplayVersion
 L ($sw | Format-Table -AutoSize); if ($sw) { Flag "Remote-access / crack-type software installed: $(($sw.DisplayName | Select -Unique) -join ', ')" }
 S 'Crack-named files/folders in Desktop and Downloads (depth 3)'
-$cr = Get-ChildItem "$env:USERPROFILE\Desktop","$env:USERPROFILE\Downloads" -Recurse -Depth 3 -Force | Where-Object Name -match 'crack|keygen|kmspico|kmsauto|activator|repack|xeno|solara|executor' | Select -First 20 FullName
+$userFolders = @(UserFolders ([Environment]::GetFolderPath('Desktop')) (TryRead 'user folders' { Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders' }))
+$cr = if ($userFolders.Count) { Get-ChildItem $userFolders -Recurse -Depth 3 -Force | Where-Object Name -match $crackName | Select -First 20 FullName }
 L ($cr | Format-Table -AutoSize); if ($cr) { Flag "Crack-named items in Desktop/Downloads ($(@($cr).Count))" }
 
 if (-not $Fast) {
@@ -159,26 +228,15 @@ if (-not $Fast) {
   $trusted = '^[A-Z]:\\(ProgramData|Users\\[^\\]+\\AppData\\(Local|Roaming))\\(Package Cache|Microsoft\\(Edge|Teams|OneDrive|WindowsApps)|Discord(PTB|Canary)?|Google|BraveSoftware|Roblox|Bloxstrap|NVIDIA( Corporation)?|Steam|Epic[^\\]*|Riot Games|Battle\.net|Code|Programs|Razer|obs-studio|Malwarebytes|Spotify|Voicemod|Medal|Opera Software|JetBrains|Everything)\\'
   $cut = (Get-Date).AddDays(-30); $sw2 = [Diagnostics.Stopwatch]::StartNew(); $stack = New-Object Collections.Stack
   # a stack: the last root pushed is walked first. ProgramData (the main hiding spot) goes first, so the time budget cuts the least important end
-  foreach ($r in "$env:USERPROFILE\Desktop","$env:USERPROFILE\Downloads",$env:PUBLIC,"$env:SystemRoot\Temp","$env:SystemRoot\SystemTemp",$env:LOCALAPPDATA,$env:APPDATA,$env:ProgramData) { if (Test-Path $r) { $stack.Push($r) } }
-  $hits = @(); $newx = @(); $dirs = 0
+  foreach ($r in @($userFolders) + @($env:PUBLIC,"$env:SystemRoot\Temp","$env:SystemRoot\SystemTemp",$env:LOCALAPPDATA,$env:APPDATA,$env:ProgramData)) { if ($r -and (Test-Path $r)) { $stack.Push($r) } }
+  $hits = @(); $newx = @(); $dirs = 0; $failedDirs = 0; $failedSamples = New-Object Collections.Generic.List[string]
   while ($stack.Count -and $sw2.Elapsed.TotalSeconds -lt $BudgetSec) {
-    $d = $stack.Pop(); $dirs++
-    try {
-      foreach ($f in [IO.Directory]::EnumerateFiles($d)) {
-        $n = [IO.Path]::GetFileName($f)
-        if ($n -match $mark) { $hits += $f }
-        elseif ($n -match '\.(exe|bat|cmd|ps1|vbs|scr)$' -and [IO.File]::GetLastWriteTime($f) -gt $cut -and $f -notmatch $trusted) { $newx += "$([IO.File]::GetLastWriteTime($f).ToString('yyyy-MM-dd')) $f" }
-      }
-      foreach ($s in [IO.Directory]::EnumerateDirectories($d)) {
-        $n = [IO.Path]::GetFileName($s)
-        if ($n -match $mark) { $hits += $s }
-        if ([IO.File]::GetAttributes($s) -band [IO.FileAttributes]::ReparsePoint) { continue }
-        if ($s -match $prune) { foreach ($f in [IO.Directory]::EnumerateFiles($s)) { if ([IO.Path]::GetFileName($f) -match $mark) { $hits += $f } }; continue }
-        $stack.Push($s)
-      }
-    } catch {}
+    $d = $stack.Pop(); $dirs++; $walk = WalkFolder $d $cut $stack
+    $hits += @($walk.Hits); $newx += @($walk.New); $failedDirs += $walk.Failed.Count
+    foreach ($failed in $walk.Failed) { if ($failedSamples.Count -lt 3) { $failedSamples.Add($failed) } }
   }
   L "walked $dirs folders in $([int]$sw2.Elapsed.TotalSeconds) s; left unvisited: $($stack.Count)"
+  ReportWalkFailures $failedDirs $failedSamples
   L '-- markers'; L $hits; if ($hits) { Flag "Known miner/proxyware/driver marker files: $(@($hits).Count) (see file walk)" }
   L '-- new executables/scripts'; L ($newx | Select -First 60)
   if ($stack.Count) { Flag "File walk hit the time budget ($BudgetSec s); $($stack.Count) folders not checked - rerun with -BudgetSec 600" }
