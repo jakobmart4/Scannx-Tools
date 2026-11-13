@@ -48,8 +48,8 @@ namespace Scannx {
             if (view.Capacity < 40 || view.ReadUInt32(0) != 0x52545353)
                 throw new InvalidOperationException("RTSS shared memory is not initialized (invalid header/signature).");
             version = view.ReadUInt32(4);
-            if (version < 0x0002000e || version > 0x00020014)
-                throw new InvalidOperationException("Unknown/unsupported RTSS OSD version; supported: 2.14 through 2.20.");
+            if (version < 0x0002000e || version > 0x00020015)
+                throw new InvalidOperationException("Unknown/unsupported RTSS OSD version; supported: 2.14 through 2.21.");
             long header = version >= 0x00020013 ? 96 : version >= 0x00020012 ? 80 :
                 version >= 0x00020010 ? 72 : version >= 0x0002000f ? 64 : 40;
             appSize = view.ReadUInt32(8); appOffset = view.ReadUInt32(12); appCount = view.ReadUInt32(16);
@@ -101,6 +101,19 @@ namespace Scannx {
             return true;
         }
 
+        private bool IsEmpty(long position, int length) {
+            for (int i = 0; i < length; i++)
+                if (view.ReadByte(position + i) != 0) return false;
+            return true;
+        }
+
+        private bool IsFree(long position) {
+            // Ownerless text can still belong to another client; leave it intact.
+            return IsEmpty(position + 256, 256) && IsEmpty(position, 256) &&
+                IsEmpty(position + 512, 4096) &&
+                (version < 0x00020014 || IsEmpty(position + 266752, 32768));
+        }
+
         private void Clear(long position, long length) {
             byte[] zeros = new byte[4096];
             for (long done = 0; done < length; done += zeros.Length) {
@@ -128,6 +141,7 @@ namespace Scannx {
                     throw new ArgumentException("OSD text must be a single printable ASCII line.");
             byte* pointer = null;
             bool locked = false;
+            bool refresh = false;
             view.SafeMemoryMappedViewHandle.AcquirePointer(ref pointer);
             try {
                 pointer += view.PointerOffset;
@@ -138,11 +152,7 @@ namespace Scannx {
                 // Slot zero is reserved for the primary OSD client by the SDK sample.
                 for (uint i = 1; i < count; i++) {
                     long candidate = offset + (long)i * size;
-                    // Require an entirely clean owner, then install the complete ID atomically.
-                    bool empty = true;
-                    for (int j = 0; j < 256; j++)
-                        if (view.ReadByte(candidate + 256 + j) != 0) { empty = false; break; }
-                    if (!empty || Interlocked.CompareExchange(ref *(long*)(pointer + candidate + 256),
+                    if (!IsFree(candidate) || Interlocked.CompareExchange(ref *(long*)(pointer + candidate + 256),
                         0x0000786e6e616353L, 0) != 0) continue;
                     slot = candidate;
                     ClearText();
@@ -150,13 +160,16 @@ namespace Scannx {
                     RequireOwner();
                     view.WriteArray(slot + 512, bytes, 0, bytes.Length);
                     RequireOwner();
-                    Interlocked.Increment(ref *(int*)(pointer + 32));
+                    refresh = true;
                     return true;
                 }
                 return false;
             } finally {
-                if (locked) Unlock(pointer);
-                view.SafeMemoryMappedViewHandle.ReleasePointer();
+                try {
+                    if (locked) Unlock(pointer);
+                    // Match the SDK protocol: notify RTSS only after writes are unlocked.
+                    if (refresh) Interlocked.Increment(ref *(int*)(pointer + 32));
+                } finally { view.SafeMemoryMappedViewHandle.ReleasePointer(); }
             }
         }
 
@@ -164,6 +177,7 @@ namespace Scannx {
             if (slot < 0) return;
             byte* pointer = null;
             bool locked = false;
+            bool refresh = false;
             view.SafeMemoryMappedViewHandle.AcquirePointer(ref pointer);
             try {
                 pointer += view.PointerOffset;
@@ -178,10 +192,12 @@ namespace Scannx {
                     0x0000786e6e616353L) != 0x0000786e6e616353L)
                     throw new InvalidOperationException("RTSS owner changed during release; the replacement owner was left intact.");
                 slot = -1;
-                Interlocked.Increment(ref *(int*)(pointer + 32));
+                refresh = true;
             } finally {
-                if (locked) Unlock(pointer);
-                view.SafeMemoryMappedViewHandle.ReleasePointer();
+                try {
+                    if (locked) Unlock(pointer);
+                    if (refresh) Interlocked.Increment(ref *(int*)(pointer + 32));
+                } finally { view.SafeMemoryMappedViewHandle.ReleasePointer(); }
             }
         }
     }

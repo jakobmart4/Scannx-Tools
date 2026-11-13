@@ -21,7 +21,7 @@ Exit 0 means the requested probe completed. Missing RTSS, unsupported versions, 
 
 ## Layout provenance
 
-Source checked on 2026-11-11: the [RTSS SDK header as distributed in RTSSTweaks][sdk] and the [Unwinder-authored SDK interface sample distributed in obs-rtss][sample]. These are public copies, not an SDK installation inspected on the target PC. Compare the installed SDK before expanding support. No header or third-party implementation is copied into this repository.
+Sources rechecked on 2026-11-13: the [RTSS SDK header as distributed in RTSSTweaks][sdk] and the [Unwinder-authored SDK interface sample distributed in obs-rtss][sample]. The field layout was also compared with the installed RTSS 7.3.5 SDK header, including its v2.21 application-entry additions; see the [Windows acceptance report][acceptance]. These additions follow the application prefix used here, so runtime array positions and strides still determine the addresses. No header or third-party implementation is copied into this repository.
 
 The following byte offsets are derived from declaration order using [Windows data type sizes][types] and [MAX_PATH = 260][path]. Sources below apply to every field listed in a row. Values are little-endian. Offsets are relative to the header, application entry or OSD entry, respectively.
 
@@ -49,17 +49,17 @@ The following byte offsets are derived from declaration order using [Windows dat
 | buffer | 4608 | 262144 | 2.12+ | [header][sdk] |
 | szOSDEx2 | 266752 | 32768 | 2.20+ | [header][sdk] |
 
-Header minimums derived from the [versioned additions][sdk]: 2.0-2.13: 36; 2.14: 40; 2.15: 64; 2.16-2.17: 72; 2.18: 80; 2.19-2.20: 96 bytes. The application prefix above is 316 bytes. OSD minimums are 266752 bytes for 2.14-2.19 and 299520 for 2.20.
+Header minimums derived from the [versioned additions][sdk]: 2.0-2.13: 36; 2.14: 40; 2.15: 64; 2.16-2.17: 72; 2.18: 80; 2.19-2.21: 96 bytes. The application prefix above is 316 bytes. OSD minimums are 266752 bytes for 2.14-2.19 and 299520 for 2.20-2.21.
 
 Array addresses always use the runtime `dw*ArrOffset + index * dw*EntrySize`, and iteration uses `dw*ArrSize`. Counts over 65536, undersized entries or ranges outside the view are rejected. The OSD probe additionally rejects overlapping arrays and OSD offsets/strides without 8-byte alignment. It clears only known text fields, leaving the embedded-data buffer and unused stride tail intact. No array base, stride or count is assumed from SDK sample array declarations. Some nearby header comments swap app/OSD names; the field names and [sample's address arithmetic][sample] determine their use.
 
-Reader support is deliberately limited to layout versions 2.0 through 2.20. Writer support is 2.14 through 2.20, where the busy bit exists. Other major versions and later minor versions fail closed. RTSS product version and shared-memory layout version are different numbers.
+Reader support is deliberately limited to layout versions 2.0 through 2.21. Writer support is 2.14 through 2.21, where the busy bit exists. Other major versions and later minor versions fail closed. RTSS product version and shared-memory layout version are different numbers.
 
 ## Ownership and cleanup
 
 The original `Add-Type` helper is needed for atomic operations on mapped fields: passing a copied integer by reference from PowerShell cannot reserve a shared slot. It references only the built-in .NET Framework `System.Core.dll`. Compilation may use ordinary temporary compiler files. [Interlocked.CompareExchange][atomic] operates directly on pinned mapped memory; no downloaded code is compiled.
 
-A session-local named mutex serializes this probe's stable owner ID. Under RTSS's busy bit, it requires an entirely empty owner buffer and atomically installs the complete `Scannx` ID before touching payload. The writer rechecks the header and full owner before each payload write, preserves unrelated busy bits, updates the global refresh counter and releases the busy bit in a C# `finally`. It holds no busy lock during the ten-second display. Cleanup clears known text fields first and conditionally releases the owner last. It never deliberately takes over another Scannx instance's slot.
+A session-local named mutex serializes this probe's stable owner ID. Under RTSS's busy bit, it requires entirely empty owner and text buffers (`szOSD`, `szOSDEx` and, on 2.20+, `szOSDEx2`) and atomically installs the complete `Scannx` ID before touching payload. Ownerless text is preserved. The writer rechecks the header and full owner before each payload write and preserves unrelated busy bits. Its C# `finally` releases the busy bit before incrementing `dwOSDFrame`, both when publishing and clearing the line, matching the SDK sample. No free slot means no refresh increment. It holds no busy lock during the ten-second display. Cleanup clears known text fields first and conditionally releases the owner last. It never deliberately takes over another Scannx instance's slot.
 
 **Concurrency limit:** the [SDK sample][sample] allocates an owner outside the busy-bit lock, with an empty check followed by a separate string write. Such a client could have observed an empty slot before this probe's atomic claim and overwrite the owner afterwards. Rechecking ownership stops further writes once that change is detected, but cannot eliminate the interval between a check and a write. Absolute exclusive ownership against that protocol cannot be guaranteed. This remains a material live-verification limit, including ordinary clients derived from the sample. Avoid starting other OSD clients during the probe.
 
@@ -67,13 +67,14 @@ If RTSS changes the layout/owner or keeps the busy bit set for three seconds, cl
 
 ## Verification status and Claude handoff
 
-Checked with Windows PowerShell 5.1: repository script parsing, compilation of the original helper and synthetic-only mapping checks. Synthetic checks covered layouts 2.14-2.20, nonstandard runtime offsets/strides, read-only output, claim/release, protected foreign/primary slots, existing Scannx slots, no-free-slot byte identity, malformed bounds/overlap/alignment, unknown versions, busy timeout, changed-owner refusal and script `finally` cleanup after an injected error. Synthetic adapters replaced the mapping name with a fresh GUID name before execution. They never opened RTSS's mapping.
+Checked with Windows PowerShell 5.1: repository script parsing, compilation of the original helper and synthetic-only mapping checks. Synthetic checks covered layouts 2.14-2.21, nonstandard runtime offsets/strides, read-only output, claim/release, protected foreign/primary slots, existing Scannx slots, ownerless text, no-free-slot byte identity, refresh notification after unlocking, malformed bounds/overlap/alignment, unknown versions, busy timeout, changed-owner refusal and script `finally` cleanup after an injected error. Synthetic adapters replaced the mapping name with a fresh GUID name before execution. They never opened RTSS's mapping.
 
-**Not verified:** nothing was run against real RTSS or a game. Live frame-counter accuracy, OSD rendering (including Ex/Ex2 selection on layout 2.20), exclusive ownership with ordinary sample-derived concurrent clients, ten-second real display and Ctrl+C cleanup remain for Claude on the authorized RTSS PC. The OSD probe writes Ex and leaves Ex2 empty. PSScriptAnalyzer was not installed for this task. No live reports or memory dumps belong in the repository, PR or issues.
+**Not verified:** nothing was run against real RTSS or a game. Live frame-counter accuracy, OSD rendering (including Ex/Ex2 selection on layouts 2.20-2.21), exclusive ownership with ordinary sample-derived concurrent clients, ten-second real display and Ctrl+C cleanup remain for Claude on the authorized RTSS PC. The OSD probe writes Ex and leaves Ex2 empty. No live reports or memory dumps belong in the repository, PR or issues.
 
 Claude's live check: run the reader while a game is present; compare its counters with RTSS; run the OSD probe once to timeout and once with Ctrl+C; confirm its line disappears and other clients' OSD survives. Assess allocation behavior with ordinary sample-derived clients, including simultaneous allocation, before accepting ownership safety. Repeat with no secondary slot available and verify no foreign slot changes. Record only sanitized outcomes, layout version and exit codes. A successful live run does not prove the absence of every allocation race.
 
-[sdk]: https://github.com/jaxFF/RTSSTweaks/blob/master/thirdparty/rtss-sdk/Include/RTSSSharedMemory.h#L302-L455
+[sdk]: https://github.com/jaxFF/RTSSTweaks/blob/e3bd8a36af03b8e6dea50bdd3e206f8138d392d1/thirdparty/rtss-sdk/Include/RTSSSharedMemory.h#L308-L573
+[acceptance]: https://github.com/jakobmart4/Scannx-Tools/pull/4#issuecomment-6854219446
 [sample]: https://github.com/jfoster/obs-rtss/blob/main/RTSSSharedMemoryInterface.cpp
 [atomic]: https://learn.microsoft.com/en-us/dotnet/api/system.threading.interlocked.compareexchange?view=netframework-4.8.1
 [types]: https://learn.microsoft.com/en-us/windows/win32/winprog/windows-data-types

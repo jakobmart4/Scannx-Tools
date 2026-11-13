@@ -18,8 +18,8 @@ function Get-RtssHeader {
     if ($Accessor.Capacity -lt 36) { throw 'RTSS mapping is shorter than its header.' }
     if ($Accessor.ReadUInt32(0) -ne 0x52545353) { throw 'RTSS shared memory is not initialized (invalid signature).' }
     $version = $Accessor.ReadUInt32(4)
-    if ($version -lt 0x00020000 -or $version -gt 0x00020014) {
-        throw ('Unknown RTSS shared-memory version 0x{0:X8}; supported: 2.0 through 2.20.' -f $version)
+    if ($version -lt 0x00020000 -or $version -gt 0x00020015) {
+        throw ('Unknown RTSS shared-memory version 0x{0:X8}; supported: 2.0 through 2.21.' -f $version)
     }
 
     # Later header additions precede the arrays; do not accept an array over them.
