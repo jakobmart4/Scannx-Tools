@@ -224,3 +224,36 @@ Describe 'summary file, game detection and fast frames' {
     (Summarize 'fast-frames') | Should Match 'frames\s+200 frames, avg 188 fps, median 5\.0 ms, p99 10\.0 ms, max 40\.0 ms, 1 hitches over 25 ms'
   }
 }
+
+Describe 'midnight, desktop measurements and verdict boundaries' {
+  It 'skips a two-minute launch across midnight before assessing memory pressure' {
+    $out = Summarize 'midnight-launch'
+    $out | Should Match '75 samples, 10 used \(game running, game start-up/exit skipped\)'
+    $out | Should Match 'no memory, disk, GPU, CPU or network trouble visible'
+    $out | Should Not Match 'MEMORY pressure'
+  }
+  It 'uses post-midnight PresentMon frames in the verdict and a pre-midnight F9 window' {
+    $out = Summarize 'midnight-play'
+    $out | Should Match '197 frames, avg 10 fps'
+    $out | Should Match 'worst 400 ms at 00:00:01'
+    $out | Should Match '23:59:58 .*frame max 400 ms\s+->\s+frame hitch'
+  }
+  It 'puts game detection and the process-name hint first in a desktop verdict' {
+    (Summarize 'no-game') | Should Match '(?m)^Verdict:\r?\n - Game not found:[^\r\n]*desktop[^\r\n]*Task Manager, Details tab'
+  }
+  It 'requires three lost pings before a high loss percentage gives a network verdict' {
+    foreach ($n in 1, 2, 3) {
+      $out = Summarize "ping-loss-$n"
+      $out | Should Match "gateway lost 0 of 5, internet lost $n of 5"
+      if ($n -lt 3) { $out | Should Not Match ' - NETWORK:' } else { $out | Should Match ' - NETWORK: 30\.0 %' }
+    }
+  }
+  It 'keeps only game rows when every game row is cut' {
+    $out = Summarize 'all-game-rows-cut'
+    $out | Should Match '12 samples, 7 used \(game running\)'
+    $out | Should Match '(?m)^cpu\s+min\s+60\.0\s+avg\s+60\.0\s+max\s+60\.0'
+  }
+  It 'keeps all four exact F9 thresholds normal and discards a GPU counter glitch' {
+    (Summarize 'mark-edges') | Should Match '(?m)^  10:00:12 .*pgIn 5,000/s, cpu 90%, gpu 95%, disk 50 ms\s+->  RAM, disk, CPU, GPU and network all normal:'
+  }
+}
