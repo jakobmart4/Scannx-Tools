@@ -19,6 +19,7 @@ Scannx is a small **read-only** Windows tool: `scan-check.ps1` (malware and heal
 | Owner | Decides: merges, releases, tags, what goes into the tool |
 | Claude Code | `scan-check.ps1`, `disk-log.ps1`, `Scannx.cmd`, `tools/`, `.github/`, `README.md`, `CHANGELOG.md`, `docs/NEXT.md` |
 | Codex | Independent reviews, tests and fixtures, the release workflow, and fixes in files handed over for a task, in its own `codex/*` branches. Tasks and the file lane of each: `docs/CODEX.md` |
+| Hermes | Small test-only tasks, one new test file each, in a local `hermes/*` branch of its own clone. It never changes a script and never pushes: Claude checks the result, the owner decides on the push |
 
 - A file belongs to one agent at a time. When a Codex task lists one of Claude's files (for example `disk-log.ps1` in task C4a), Claude leaves it alone until that pull request is merged or closed.
 - One branch and one pull request per task. Never push to `main` or to another agent's branch (the one exception is written in `docs/CODEX.md`), never merge, never tag or release.
