@@ -13,6 +13,26 @@ $ast.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefiniti
   ForEach-Object { Invoke-Expression $_.Extent.Text }
 $unread = New-Object Collections.Generic.List[string]
 
+# A real lazy enumerator is needed: PowerShell function output is collected before foreach.
+if (-not ('ScannxTestWalkSequence' -as [type])) {
+  Add-Type @'
+using System;
+using System.Collections;
+public sealed class ScannxTestWalkSequence : IEnumerable {
+  private readonly string[] paths;
+  private readonly bool fail;
+  public ScannxTestWalkSequence(string[] paths, bool fail) { this.paths = paths; this.fail = fail; }
+  public IEnumerator GetEnumerator() {
+    foreach (string path in paths) { yield return path; }
+    if (fail) { throw new InvalidOperationException("Synthetic lazy enumeration failure"); }
+  }
+}
+'@
+}
+function WalkSequence([string[]]$paths = @(), [switch]$fail) {
+  ,([ScannxTestWalkSequence]::new($paths, $fail.IsPresent))
+}
+
 Describe 'scan-check.ps1 rules' {
   It 'loads every rule from the script' {
     foreach ($v in $vars) { (Get-Variable $v -ValueOnly) | Should Not BeNullOrEmpty }
@@ -255,30 +275,33 @@ Describe 'C4b scan fixes (synthetic inputs only)' {
   }
   Context 'file-walk failures and traversal' {
     It 'preserves marker pruning reparse and child-stack behavior' {
+      $recent = Join-Path $TestDrive 'recent.exe'
+      [IO.File]::WriteAllText($recent, 'synthetic')
+      [IO.File]::SetLastWriteTime($recent, [datetime]'2026-01-02')
       Mock WalkRead {
         switch ($kind) {
-          'files' { if ($path -eq 'C:\Synthetic\node_modules') { 'C:\Synthetic\node_modules\xmrig.exe' } else { 'C:\Synthetic\xmrig.exe'; 'C:\Synthetic\recent.exe' } }
-          'directories' { 'C:\Synthetic\first'; 'C:\Synthetic\node_modules'; 'C:\Synthetic\junction'; 'C:\Synthetic\last' }
+          'files' { if ($path -eq 'C:\Synthetic\node_modules') { WalkSequence @('C:\Synthetic\node_modules\xmrig.exe') } else { WalkSequence @('C:\Synthetic\xmrig.exe', $recent) } }
+          'directories' { WalkSequence @('C:\Synthetic\first', 'C:\Synthetic\node_modules', 'C:\Synthetic\junction', 'C:\Synthetic\last') }
           'attributes' { if ($path -like '*junction') { [IO.FileAttributes]::ReparsePoint } else { [IO.FileAttributes]::Directory } }
-          'modified' { [datetime]'2026-01-02' }
         }
       }
       $stack = New-Object Collections.Stack
       $walk = WalkFolder 'C:\Synthetic' ([datetime]'2026-01-01') $stack
       $walk.Hits.Count | Should Be 2; $walk.New.Count | Should Be 1; $walk.Failed.Count | Should Be 0
+      $walk.New[0] | Should Be "2026-01-02 $recent"
       ($walk.Hits -join '|') | Should Match 'node_modules\\xmrig.exe'
       $stack.Pop() | Should Be 'C:\Synthetic\last'; $stack.Pop() | Should Be 'C:\Synthetic\first'; $stack.Count | Should Be 0
     }
     It 'retains markers emitted before a file enumeration fails' {
-      Mock WalkRead { if ($kind -eq 'files') { 'C:\Synthetic\xmrig.exe'; throw 'Synthetic lazy enumeration failure' } }
+      Mock WalkRead { if ($kind -eq 'files') { WalkSequence @('C:\Synthetic\xmrig.exe') -fail } }
       $walk = WalkFolder 'C:\Synthetic' ([datetime]'2026-01-01') (New-Object Collections.Stack)
       $walk.Hits.Count | Should Be 1; $walk.Hits[0] | Should Be 'C:\Synthetic\xmrig.exe'; $walk.Failed.Count | Should Be 1; $walk.Failed[0] | Should Be 'C:\Synthetic'
     }
     It 'retains queued and later siblings when a pruned folder fails' {
       Mock WalkRead {
         switch ($kind) {
-          'files' { if ($path -like '*node_modules') { 'C:\Synthetic\node_modules\xmrig.exe'; throw 'Synthetic pruned-folder read failure' } }
-          'directories' { 'C:\Synthetic\queued'; 'C:\Synthetic\node_modules'; 'C:\Synthetic\later' }
+          'files' { if ($path -like '*node_modules') { WalkSequence @('C:\Synthetic\node_modules\xmrig.exe') -fail } }
+          'directories' { WalkSequence @('C:\Synthetic\queued', 'C:\Synthetic\node_modules', 'C:\Synthetic\later') }
           'attributes' { [IO.FileAttributes]::Directory }
         }
       }
@@ -289,7 +312,7 @@ Describe 'C4b scan fixes (synthetic inputs only)' {
     It 'continues to a healthy sibling after the first child attributes fail' {
       Mock WalkRead {
         switch ($kind) {
-          'directories' { 'C:\Synthetic\denied'; 'C:\Synthetic\healthy' }
+          'directories' { WalkSequence @('C:\Synthetic\denied', 'C:\Synthetic\healthy') }
           'attributes' { if ($path -like '*denied') { throw 'Synthetic attribute failure' }; [IO.FileAttributes]::Directory }
         }
       }
@@ -300,18 +323,13 @@ Describe 'C4b scan fixes (synthetic inputs only)' {
     It 'retains queued children before a parent directory enumeration fails' {
       Mock WalkRead {
         switch ($kind) {
-          'directories' { 'C:\Synthetic\queued'; throw 'Synthetic parent enumeration failure' }
+          'directories' { WalkSequence @('C:\Synthetic\queued') -fail }
           'attributes' { [IO.FileAttributes]::Directory }
         }
       }
       $stack = New-Object Collections.Stack; $walk = WalkFolder 'C:\Synthetic' ([datetime]'2026-01-01') $stack
       $walk.Failed.Count | Should Be 1; $walk.Failed[0] | Should Be 'C:\Synthetic'
       $stack.Count | Should Be 1; $stack.Pop() | Should Be 'C:\Synthetic\queued'
-    }
-    It 'records an actual IO failure for a nonexistent synthetic folder' {
-      $absent = Join-Path $env:TEMP ('scannx-absent-' + [guid]::NewGuid().ToString('N'))
-      $walk = WalkFolder $absent ([datetime]'2026-01-01') (New-Object Collections.Stack)
-      $walk.Failed.Count | Should Be 1; $walk.Failed[0] | Should Be $absent
     }
     It 'keeps the outer walk stack order and stops before an exhausted budget' {
       $loop = $ast.Find({ param($node) $node -is [Management.Automation.Language.WhileStatementAst] -and $node.Body.Extent.Text -match 'WalkFolder' }, $true)
@@ -334,6 +352,20 @@ Describe 'C4b scan fixes (synthetic inputs only)' {
       . ([scriptblock]::Create($loop.Extent.Text))
       $failedDirs | Should Be 5; $failedSamples.Count | Should Be 3; ($failedSamples -join ',') | Should Be 'synthetic-5,synthetic-4,synthetic-3'
     }
+    It 'accumulates findings around folders with empty result lists' {
+      $loop = $ast.Find({ param($node) $node -is [Management.Automation.Language.WhileStatementAst] -and $node.Body.Extent.Text -match 'WalkFolder' }, $true)
+      Mock WalkFolder {
+        if ($directory -eq 'empty') { [pscustomobject]@{Hits=@();New=@();Failed=@()} }
+        else { [pscustomobject]@{Hits=@("$directory-marker");New=@("2026-01-02 $directory.exe");Failed=@()} }
+      }
+      $stack=New-Object Collections.Stack; 'last','empty','first' | ForEach-Object { $stack.Push($_) }
+      $sw2=[pscustomobject]@{Elapsed=[pscustomobject]@{TotalSeconds=0}}; $BudgetSec=10; $cut=[datetime]'2026-01-01'
+      $hits=@(); $newx=@(); $dirs=0; $failedDirs=0; $failedSamples=New-Object Collections.Generic.List[string]
+      . ([scriptblock]::Create($loop.Extent.Text))
+      ($hits -join '|') | Should Be 'first-marker|last-marker'
+      ($newx -join '|') | Should Be '2026-01-02 first.exe|2026-01-02 last.exe'
+      $dirs | Should Be 3; $failedDirs | Should Be 0; $stack.Count | Should Be 0
+    }
     It 'reports one aggregated failure entry in the walk and report head' {
       Mock L { }
       $unread.Clear(); ReportWalkFailures 7 @('C:\Synthetic\one','C:\Synthetic\two','C:\Synthetic\three')
@@ -341,5 +373,31 @@ Describe 'C4b scan fixes (synthetic inputs only)' {
       Assert-MockCalled L -Times 1 -Exactly -Scope It -ParameterFilter { $x -match 'could not read 7 folders' }
       $unread.Clear(); ReportWalkFailures 0 @(); $unread.Count | Should Be 0
     }
+  }
+}
+
+Describe 'file walk with real synthetic IO' {
+  It 'records an actual IO failure for a nonexistent synthetic folder' {
+    $absent = Join-Path $env:TEMP ('scannx-absent-' + [guid]::NewGuid().ToString('N'))
+    $walk = WalkFolder $absent ([datetime]'2026-01-01') (New-Object Collections.Stack)
+    $walk.Failed.Count | Should Be 1; $walk.Failed[0] | Should Be $absent
+  }
+
+  It 'walks real synthetic files and empty folders while preserving the timestamp cutoff' {
+    $root = Join-Path $TestDrive 'walk-files'
+    $empty = Join-Path $root 'empty'
+    [void][IO.Directory]::CreateDirectory($empty)
+    $newFile = Join-Path $root 'new.ps1'; $oldFile = Join-Path $root 'old.exe'
+    $marker = Join-Path $root 'xmrig.exe'
+    foreach ($file in $newFile, $oldFile, $marker) { [IO.File]::WriteAllText($file, 'synthetic') }
+    [IO.File]::SetLastWriteTime($newFile, [datetime]'2026-01-02')
+    [IO.File]::SetLastWriteTime($oldFile, [datetime]'2026-01-01')
+    $stack = New-Object Collections.Stack
+    $walk = WalkFolder $root ([datetime]'2026-01-01') $stack
+    $walk.Hits.Count | Should Be 1; $walk.Hits[0] | Should Be $marker
+    $walk.New.Count | Should Be 1; $walk.New[0] | Should Be "2026-01-02 $newFile"
+    $walk.Failed.Count | Should Be 0; $stack.Count | Should Be 1
+    $walk = WalkFolder $stack.Pop() ([datetime]'2026-01-01') $stack
+    $walk.Hits.Count | Should Be 0; $walk.New.Count | Should Be 0; $walk.Failed.Count | Should Be 0
   }
 }

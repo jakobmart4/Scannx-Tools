@@ -81,31 +81,32 @@ function UserFolders($desktop, $shellFolders) {
   $downloads = "$($shellFolders.'{374DE290-123F-4565-9164-39C4925E467B}')"
   @($desktop, [Environment]::ExpandEnvironmentVariables($downloads)) | Where-Object { $_ } | Select-Object -Unique
 }
-# The narrow IO seam lets tests throw during enumeration without touching real folders.
+# Return the enumerable intact so foreach retains earlier results if a later MoveNext fails.
 function WalkRead($kind, $path) {
   switch ($kind) {
-    'files' { [IO.Directory]::EnumerateFiles($path) }
-    'directories' { [IO.Directory]::EnumerateDirectories($path) }
+    'files' { ,([IO.Directory]::EnumerateFiles($path)) }
+    'directories' { ,([IO.Directory]::EnumerateDirectories($path)) }
     'attributes' { [IO.File]::GetAttributes($path) }
-    'modified' { [IO.File]::GetLastWriteTime($path) }
   }
 }
 function WalkFolder($directory, $cut, $stack) {
-  $hits = New-Object Collections.Generic.List[string]; $newx = New-Object Collections.Generic.List[string]
-  $failed = New-Object Collections.Generic.List[string]
+  $hits = [Collections.Generic.List[string]]::new(); $newx = [Collections.Generic.List[string]]::new()
+  $failed = [Collections.Generic.List[string]]::new()
   try {
-    WalkRead 'files' $directory | ForEach-Object {
-      $file = $_; $name = [IO.Path]::GetFileName($file)
+    foreach ($file in (WalkRead 'files' $directory)) {
+      $name = [IO.Path]::GetFileName($file)
       if ($name -match $mark) { $hits.Add($file) }
-      elseif ($name -match '\.(exe|bat|cmd|ps1|vbs|scr)$' -and (WalkRead 'modified' $file) -gt $cut -and $file -notmatch $trusted) { $newx.Add("$((WalkRead 'modified' $file).ToString('yyyy-MM-dd')) $file") }
+      elseif ($name -match '\.(exe|bat|cmd|ps1|vbs|scr)$') {
+        $modified = [IO.File]::GetLastWriteTime($file)
+        if ($modified -gt $cut -and $file -notmatch $trusted) { $newx.Add("$($modified.ToString('yyyy-MM-dd')) $file") }
+      }
     }
-    WalkRead 'directories' $directory | ForEach-Object {
-      $child = $_
+    foreach ($child in (WalkRead 'directories' $directory)) {
       try {
         $name = [IO.Path]::GetFileName($child)
         if ($name -match $mark) { $hits.Add($child) }
         if (-not ((WalkRead 'attributes' $child) -band [IO.FileAttributes]::ReparsePoint)) {
-          if ($child -match $prune) { WalkRead 'files' $child | ForEach-Object { if ([IO.Path]::GetFileName($_) -match $mark) { $hits.Add($_) } } }
+          if ($child -match $prune) { foreach ($file in (WalkRead 'files' $child)) { if ([IO.Path]::GetFileName($file) -match $mark) { $hits.Add($file) } } }
           else { $stack.Push($child) }
         }
       } catch { $failed.Add($child) }
@@ -232,7 +233,9 @@ if (-not $Fast) {
   $hits = @(); $newx = @(); $dirs = 0; $failedDirs = 0; $failedSamples = New-Object Collections.Generic.List[string]
   while ($stack.Count -and $sw2.Elapsed.TotalSeconds -lt $BudgetSec) {
     $d = $stack.Pop(); $dirs++; $walk = WalkFolder $d $cut $stack
-    $hits += @($walk.Hits); $newx += @($walk.New); $failedDirs += $walk.Failed.Count
+    if ($walk.Hits.Count) { $hits += @($walk.Hits) }
+    if ($walk.New.Count) { $newx += @($walk.New) }
+    $failedDirs += $walk.Failed.Count
     foreach ($failed in $walk.Failed) { if ($failedSamples.Count -lt 3) { $failedSamples.Add($failed) } }
   }
   L "walked $dirs folders in $([int]$sw2.Elapsed.TotalSeconds) s; left unvisited: $($stack.Count)"
