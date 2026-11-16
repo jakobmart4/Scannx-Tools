@@ -30,7 +30,13 @@ function N($x) { @($x | Where-Object { $_ }).Count }               # @($null).Co
 # TryRead 'name' { read }: (not "Rd": rd is an alias of Remove-Item and aliases win over functions) runs a key read and notes it when it failed. An empty result alone would look the same as "nothing found".
 function TryRead($what, [scriptblock]$read) {
   $Error.Clear(); $r = & $read
-  if ($Error.Count -and "$($Error[0].FullyQualifiedErrorId)" -notmatch 'NoMatchingEventsFound') { $unread.Add("$what ($(("$($Error[0].Exception.Message)" -replace '\s+', ' ').Trim()))") }
+  # One read can fail more than once, and $Error keeps the newest first: walk a copy of the
+  # errors, so a benign "no events found" in front cannot hide a real one and no message is lost.
+  $caught = @($Error)
+  foreach ($e in $caught) {
+    if ("$($e.FullyQualifiedErrorId)" -match 'NoMatchingEventsFound') { continue }
+    $unread.Add("$what ($(("$($e.Exception.Message)" -replace '\s+', ' ').Trim()))")
+  }
   $r
 }
 # Exact Platform binaries from Microsoft's connectivity documentation, not a blanket folder exemption.
