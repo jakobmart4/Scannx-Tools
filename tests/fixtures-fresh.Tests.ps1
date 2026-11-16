@@ -25,11 +25,14 @@ function Get-FixtureFileList([string]$root) {
   return @($list | Sort-Object)
 }
 
-# Only the UTF-8 BOM and CRLF are normalised away. Spaces, blank lines, number formats,
-# timestamps and a missing final newline all stay differences.
+# Only the UTF-8 BOM and CRLF are normalised away, and both comparisons are ordinal: the
+# current culture must not decide whether two fixtures are equal. Spaces, blank lines, number
+# formats, timestamps, a NUL byte and a missing final newline all stay differences.
 function Get-FixtureText([string]$path) {
   $bytes = [IO.File]::ReadAllBytes($path)
-  if ($bytes.Length -ge 4 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+  if ($bytes.Length -eq 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+    $bytes = [byte[]]@()      # a file holding only the BOM reads as an empty file
+  } elseif ($bytes.Length -gt 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
     $bytes = $bytes[3..($bytes.Length - 1)]
   }
   return [Text.Encoding]::UTF8.GetString($bytes).Replace("`r`n", "`n")
@@ -38,14 +41,14 @@ function Get-FixtureText([string]$path) {
 function Get-FixtureTextDifference([string]$committedPath, [string]$generatedPath) {
   $committed = Get-FixtureText $committedPath
   $generated = Get-FixtureText $generatedPath
-  if ($committed -ceq $generated) { return '' }
+  if ([string]::Equals($committed, $generated, [StringComparison]::Ordinal)) { return '' }
   $committedLines = $committed -split "`n"
   $generatedLines = $generated -split "`n"
   $lines = [Math]::Max($committedLines.Count, $generatedLines.Count)
   for ($i = 0; $i -lt $lines; $i++) {
     $left = if ($i -lt $committedLines.Count) { $committedLines[$i] } else { '<no line>' }
     $right = if ($i -lt $generatedLines.Count) { $generatedLines[$i] } else { '<no line>' }
-    if ($left -cne $right) {
+    if (-not [string]::Equals($left, $right, [StringComparison]::Ordinal)) {
       if ($left.Length -gt 120) { $left = $left.Substring(0, 120) + '...' }
       if ($right.Length -gt 120) { $right = $right.Substring(0, 120) + '...' }
       return "line $($i + 1): committed '$left', generated '$right'"
@@ -147,5 +150,7 @@ try {
     }
   }
 } finally {
-  try { Remove-FixtureTempRoot -Path $tempRootFull } catch { Write-Warning "temporary folder left behind: $_" }
+  # A failure here is not downgraded to a warning: it fails the Pester run, after the
+  # resolved-path and TEMP-boundary checks inside the function have passed.
+  Remove-FixtureTempRoot -Path $tempRootFull
 }
