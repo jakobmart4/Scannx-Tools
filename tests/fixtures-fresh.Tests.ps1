@@ -2,8 +2,8 @@
 # and that the result does not depend on the regional format: en-US, de-DE and et-EE must all
 # write the same bytes. The generator is the only program started here: scan-check.ps1,
 # disk-log.ps1 and Scannx.cmd are never run.
-# Only an optional UTF-8 BOM and CRLF versus LF are ignored when the committed content is
-# compared; the culture comparison is byte for byte.
+# Committed content is compared with an optional UTF-8 BOM and CRLF versus LF ignored; the
+# comparison between the cultures is byte for byte, because there the bytes must agree.
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $fixturesRoot = Join-Path $here 'fixtures'
@@ -18,7 +18,8 @@ $tempRoot = Join-Path $env:TEMP ('scannx fixtures fresh ' + [guid]::NewGuid().To
 $tempRootFull = [IO.Path]::GetFullPath($tempRoot).TrimEnd('\')
 $cultureRoot = Join-Path $env:TEMP ('scannx fixtures cultures ' + [guid]::NewGuid().ToString('N'))
 $script:cultureTempRoot = [IO.Path]::GetFullPath($cultureRoot).TrimEnd('\')
-$cultures = @('en-US', 'de-DE', 'et-EE')
+$referenceCulture = 'en-US'
+$cultures = @($referenceCulture, 'de-DE', 'et-EE')
 
 function Get-FixtureRelativePath([string]$root, [string]$file) {
   return $file.Substring($root.TrimEnd('\').Length + 1)
@@ -63,16 +64,16 @@ function Get-FixtureTextDifference([string]$committedPath, [string]$generatedPat
   return 'same lines, different bytes'
 }
 
-# Byte for byte, no normalisation: the culture comparison must not forgive a different BOM
-# or a different line ending, because both would differ from the committed tree as well.
-function Test-FixtureByteDifference([string]$committedPath, [string]$generatedPath) {
-  $committed = [IO.File]::ReadAllBytes($committedPath)
+# Byte for byte, no normalisation: between two cultures both files are ours, so a different
+# BOM or line ending is a real difference. The committed tree is not the baseline here.
+function Test-FixtureByteDifference([string]$referencePath, [string]$generatedPath) {
+  $reference = [IO.File]::ReadAllBytes($referencePath)
   $generated = [IO.File]::ReadAllBytes($generatedPath)
-  if ($committed.Length -ne $generated.Length) {
-    return "$($committed.Length) versus $($generated.Length) bytes"
+  if ($reference.Length -ne $generated.Length) {
+    return "$($generated.Length) bytes against the reference $($reference.Length)"
   }
-  for ($i = 0; $i -lt $committed.Length; $i++) {
-    if ($committed[$i] -ne $generated[$i]) { return "bytes differ at offset $i" }
+  for ($i = 0; $i -lt $reference.Length; $i++) {
+    if ($reference[$i] -ne $generated[$i]) { return "bytes differ from the reference at offset $i" }
   }
   return ''
 }
@@ -204,6 +205,17 @@ try {
   # produces rows with more columns than the header. These tests run the real generator in a
   # child powershell.exe whose own CurrentCulture is the culture under test.
   Describe 'the generated fixtures do not depend on the regional format' {
+    It "writes a non-empty reference set under $referenceCulture" {
+      $reference = $cultureResults[$referenceCulture]
+      if ($reference.ExitCode -ne 0) {
+        throw "the $referenceCulture reference run exited $($reference.ExitCode). Output: $($reference.Output.Trim())"
+      }
+      if ($reference.Files.Count -eq 0) {
+        throw "the $referenceCulture reference run wrote no files into '$($reference.Root)', so the cultures cannot be compared"
+      }
+      $reference.Files.Count -gt 0 | Should Be $true
+    }
+
     foreach ($culture in $cultures) {
       Context $culture {
         It "generates the committed file list under $culture" {
@@ -223,17 +235,18 @@ try {
           ($missing.Count + $unexpected.Count) | Should Be 0
         }
 
-        It "writes fixture files byte-identical to the committed ones under $culture" {
+        It "writes content matching the committed fixtures under $culture" {
           $result = $cultureResults[$culture]
           if ($result.Files.Count -eq 0) { throw "the generator wrote no files under $culture" }
           $differences = @()
           foreach ($relative in (Get-FixtureFileList $fixturesRoot)) {
+            # A missing file is the file-list test's finding; here only content is compared.
             if ($result.Files -notcontains $relative) { continue }
-            $difference = Test-FixtureByteDifference (Join-Path $fixturesRoot $relative) (Join-Path $result.Root $relative)
+            $difference = Get-FixtureTextDifference (Join-Path $fixturesRoot $relative) (Join-Path $result.Root $relative)
             if ($difference) { $differences += "${relative}: $difference" }
           }
           if ($differences.Count -gt 0) {
-            throw ("$($differences.Count) file(s) differ from the committed bytes under $culture`n" +
+            throw ("$($differences.Count) file(s) differ from the committed content under $culture`n" +
               ((@($differences | Select-Object -First 10)) -join "`n"))
           }
           $differences.Count | Should Be 0
@@ -257,6 +270,32 @@ try {
               ((@($bad | Select-Object -First 5)) -join '; '))
           }
           $bad.Count | Should Be 0
+        }
+      }
+    }
+
+    # The culture comparison is byte for byte against the en-US run, not against the committed
+    # tree: the committed files may legitimately be stored with LF or without a BOM.
+    foreach ($culture in ($cultures | Where-Object { $_ -ne $referenceCulture })) {
+      Context $culture {
+        It "writes bytes identical to the $referenceCulture reference under $culture" {
+          $result = $cultureResults[$culture]
+          $reference = $cultureResults[$referenceCulture]
+          if ($reference.Files.Count -eq 0) {
+            throw "the $referenceCulture reference run wrote no files, so $culture has nothing to be compared with"
+          }
+          if ($result.Files.Count -eq 0) { throw "the generator wrote no files under $culture" }
+          $differences = @()
+          foreach ($relative in $reference.Files) {
+            if ($result.Files -notcontains $relative) { continue }
+            $difference = Test-FixtureByteDifference (Join-Path $reference.Root $relative) (Join-Path $result.Root $relative)
+            if ($difference) { $differences += "${relative}: $difference" }
+          }
+          if ($differences.Count -gt 0) {
+            throw ("$($differences.Count) file(s) differ from the $referenceCulture bytes under $culture`n" +
+              ((@($differences | Select-Object -First 10)) -join "`n"))
+          }
+          $differences.Count | Should Be 0
         }
       }
     }
