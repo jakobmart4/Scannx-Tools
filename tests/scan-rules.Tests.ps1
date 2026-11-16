@@ -401,3 +401,60 @@ Describe 'file walk with real synthetic IO' {
     $walk.Hits.Count | Should Be 0; $walk.New.Count | Should Be 0; $walk.Failed.Count | Should Be 0
   }
 }
+
+# A read can report more than one error, and $Error keeps the newest first. Every error of the
+# read that is not a benign "no events found" has to reach $unread; the old code looked at
+# $Error[0] only, so a second failure (or a benign error in front of it) was lost.
+Describe 'TryRead keeps every error from one read' {
+  It 'keeps the output of a read that reported nothing' {
+    $unread.Clear()
+    (TryRead 'plain read' { 'value' }) | Should Be 'value'
+    $unread.Count | Should Be 0
+  }
+  It 'records two distinct nonterminating errors once each' {
+    $unread.Clear()
+    $null = TryRead 'two errors' { Write-Error 'synthetic first failure' -ErrorId ScanReadOne; Write-Error 'synthetic second failure' -ErrorId ScanReadTwo }
+    $unread.Count | Should Be 2
+    @($unread | Where-Object { $_ -match '^two errors \(synthetic first failure\)$' }).Count | Should Be 1
+    @($unread | Where-Object { $_ -match '^two errors \(synthetic second failure\)$' }).Count | Should Be 1
+  }
+  It 'keeps the output and both errors of a mixed read' {
+    $unread.Clear()
+    $result = @(TryRead 'mixed read' { 'partial data'; Write-Error 'synthetic first failure' -ErrorId ScanReadOne; Write-Error 'synthetic second failure' -ErrorId ScanReadTwo })
+    ($result -join '|') | Should Be 'partial data'
+    $unread.Count | Should Be 2
+    "$unread" | Should Match 'synthetic first failure'
+    "$unread" | Should Match 'synthetic second failure'
+  }
+  It 'records nothing when every error is NoMatchingEventsFound' {
+    $unread.Clear()
+    $null = TryRead 'events' { Write-Error 'none' -ErrorId NoMatchingEventsFound; Write-Error 'still none' -ErrorId NoMatchingEventsFound }
+    $unread.Count | Should Be 0
+  }
+  It 'records the real error when NoMatchingEventsFound comes first' {
+    $unread.Clear()
+    $null = TryRead 'mixed events' { Write-Error 'none' -ErrorId NoMatchingEventsFound; Write-Error 'synthetic real failure' -ErrorId ScanReadReal }
+    $unread.Count | Should Be 1
+    "$unread" | Should Be 'mixed events (synthetic real failure)'
+  }
+  It 'records the real error when NoMatchingEventsFound comes last' {
+    $unread.Clear()
+    $null = TryRead 'mixed events' { Write-Error 'synthetic real failure' -ErrorId ScanReadReal; Write-Error 'none' -ErrorId NoMatchingEventsFound }
+    $unread.Count | Should Be 1
+    "$unread" | Should Be 'mixed events (synthetic real failure)'
+  }
+  It 'adds nothing stale on the next clean read' {
+    $unread.Clear()
+    $null = TryRead 'first read' { Write-Error 'synthetic first failure' -ErrorId ScanReadOne }
+    $unread.Count | Should Be 1
+    (TryRead 'second read' { 'clean value' }) | Should Be 'clean value'
+    $unread.Count | Should Be 1
+    "$unread" | Should Not Match 'second read'
+  }
+  It 'normalizes line breaks and repeated spaces in a message' {
+    $unread.Clear()
+    $null = TryRead 'the thing' { Write-Error "first line`r`nsecond   line`tend" -ErrorId ScanReadMultiline }
+    $unread.Count | Should Be 1
+    "$unread" | Should Be 'the thing (first line second line end)'
+  }
+}
