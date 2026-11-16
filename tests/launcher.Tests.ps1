@@ -1,5 +1,5 @@
 # Static tests for Scannx.cmd. The launcher is read as bytes and as text and is never started:
-# running it asks for administrator rights. A change to these rules must fail here, not on UAC.
+# running it asks for administrator rights.
 
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $launcherPath = Join-Path (Split-Path -Parent $here) 'Scannx.cmd'
@@ -22,6 +22,13 @@ function Get-LauncherCodeLines([string[]]$lines) {
     $code += [pscustomobject]@{ Number = $i + 1; Text = $text }
   }
   return $code
+}
+
+function Get-LauncherFirstIndex([string[]]$lines, [string]$pattern) {
+  for ($i = 0; $i -lt $lines.Count; $i++) {
+    if ($lines[$i].Trim() -match $pattern) { return $i }
+  }
+  return -1
 }
 
 Describe 'Scannx.cmd, read as text only' {
@@ -84,32 +91,62 @@ Describe 'Scannx.cmd, read as text only' {
     $problems.Count | Should Be 0
   }
 
-  It 'has an "unzip first" branch that pauses and fails before any menu call' {
-    $guardIndex = -1
-    for ($i = 0; $i -lt $launcherLines.Count; $i++) {
-      if ($launcherLines[$i] -match '(?i)^\s*if not exist "%~dp0scan-check\.ps1"') { $guardIndex = $i; break }
-    }
+  It 'has a closed "unzip first" block with a nonzero exit, before elevation and the menu' {
+    $guardIndex = Get-LauncherFirstIndex $launcherLines '(?i)^if not exist "%~dp0scan-check\.ps1"'
     if ($guardIndex -lt 0) { throw 'no "if not exist scan-check.ps1" guard: started from inside the zip it would call a missing script' }
 
-    # The branch runs until the closing parenthesis of the if block.
-    $block = @()
-    for ($i = $guardIndex + 1; $i -lt $launcherLines.Count; $i++) {
-      $text = $launcherLines[$i].Trim()
-      if ($text -eq ')') { break }
-      $block += $text
-    }
     $problems = @()
-    if (@($block | Where-Object { $_ -match '(?i)Unzip first' }).Count -eq 0) { $problems += 'the guard does not say "Unzip first"' }
-    if (@($block | Where-Object { $_ -match '(?i)^pause$' }).Count -eq 0) { $problems += 'the guard does not pause, so a double-click closes the window' }
-    if (@($block | Where-Object { $_ -match '(?i)^exit /b' }).Count -eq 0) { $problems += 'the guard does not leave with an exit code' }
-
-    # The guard has to come before the first script call, or the menu runs anyway.
-    $firstCall = -1
-    for ($i = 0; $i -lt $launcherLines.Count; $i++) {
-      if ($launcherLines[$i] -match '(?i)%PS%') { $firstCall = $i; break }
+    if ($launcherLines[$guardIndex] -notmatch '\(\s*$') {
+      $problems += "the guard at line $($guardIndex + 1) has no opening parenthesis, so it guards one command only"
     }
-    if ($firstCall -ge 0 -and $firstCall -lt $guardIndex) {
-      $problems += "the guard sits at line $($guardIndex + 1), after the first script call at line $($firstCall + 1)"
+
+    # The block has to be closed: without the parenthesis, cmd.exe reads the rest of the file
+    # as part of the if statement.
+    $closerIndex = -1
+    for ($i = $guardIndex + 1; $i -lt $launcherLines.Count; $i++) {
+      if ($launcherLines[$i].Trim().StartsWith(')')) { $closerIndex = $i; break }
+    }
+    if ($closerIndex -lt 0) {
+      $problems += "the guard block at line $($guardIndex + 1) has no closing parenthesis before the end of the file"
+      $block = @($launcherLines[($guardIndex + 1)..($launcherLines.Count - 1)] | ForEach-Object { $_.Trim() })
+    } else {
+      $block = @()
+      for ($i = $guardIndex + 1; $i -lt $closerIndex; $i++) { $block += $launcherLines[$i].Trim() }
+    }
+
+    if (@($block | Where-Object { $_ -match '(?i)Unzip first' }).Count -eq 0) {
+      $problems += 'the guard does not say "Unzip first"'
+    }
+    if (@($block | Where-Object { $_ -match '(?i)^pause$' }).Count -eq 0) {
+      $problems += 'the guard does not pause, so a double-click closes the window'
+    }
+    $exitLines = @($block | Where-Object { $_ -match '(?i)^exit\s+/b' })
+    if ($exitLines.Count -eq 0) {
+      $problems += 'the guard does not leave with exit /b'
+    } else {
+      foreach ($exitLine in $exitLines) {
+        if ($exitLine -notmatch '(?i)^exit\s+/b\s+(\d+)$') {
+          $problems += "the guard exits without an explicit numeric code: $exitLine"
+        } elseif ([int]$Matches[1] -eq 0) {
+          $problems += "the guard exits with 0, which a calling script reads as success: $exitLine"
+        }
+      }
+    }
+
+    # The guard is worthless after the elevation step or after the menu has been offered.
+    $anchors = @(
+      @{ Name = 'the elevation step'; Pattern = '(?i)(\bfltmc| -Verb RunAs)' },
+      @{ Name = 'the menu label'; Pattern = '(?i)^:menu$' },
+      @{ Name = 'the menu prompt'; Pattern = '(?i)^set\s+/p\s+"?c=' },
+      @{ Name = 'the first script call'; Pattern = '(?i)%PS%' }
+    )
+    foreach ($anchor in $anchors) {
+      $index = Get-LauncherFirstIndex $launcherLines $anchor.Pattern
+      if ($index -lt 0) {
+        $problems += "no $($anchor.Name) found, so the guard order cannot be checked"
+      } elseif ($index -lt $guardIndex) {
+        $problems += "the guard sits at line $($guardIndex + 1), after $($anchor.Name) at line $($index + 1)"
+      }
     }
 
     if ($problems.Count -gt 0) {
@@ -118,22 +155,28 @@ Describe 'Scannx.cmd, read as text only' {
     $problems.Count | Should Be 0
   }
 
-  It 'gives every goto a label that exists' {
+  It 'gives every goto in executable code a label that exists' {
     $labels = @()
-    $targets = @()
     for ($i = 0; $i -lt $launcherLines.Count; $i++) {
       $text = $launcherLines[$i].Trim()
+      if ($text -match '^::') { continue }
       if ($text -match '^:([A-Za-z0-9_]+)') { $labels += $Matches[1].ToLower() }
-      foreach ($match in [regex]::Matches($text, '(?i)\bgoto\s+([^\s&|"]+)')) {
-        $targets += [pscustomobject]@{ Number = $i + 1; Target = $match.Groups[1].Value.ToLower() }
+    }
+
+    # Only code lines can jump: "goto" inside a rem or an echo is text for the user.
+    $targets = @()
+    foreach ($line in (Get-LauncherCodeLines $launcherLines)) {
+      foreach ($match in [regex]::Matches($line.Text, '(?i)\bgoto\s+([^\s&|"]+)')) {
+        $targets += [pscustomobject]@{ Number = $line.Number; Target = $match.Groups[1].Value.ToLower() }
       }
     }
+
     $problems = @()
     if ($targets.Count -eq 0) { $problems += 'the launcher has no goto at all, so the menu cannot loop' }
     if ($labels.Count -eq 0) { $problems += 'the launcher has no labels at all' }
-    # :eof is built in; anything else must be defined here.
     foreach ($target in $targets) {
-      if ($target.Target -eq ':eof' -or $target.Target -eq 'eof') { continue }
+      # :eof is the only label cmd.exe supplies itself; a plain "goto eof" needs a real label.
+      if ($target.Target -eq ':eof') { continue }
       if ($labels -notcontains $target.Target) {
         $problems += "line $($target.Number) jumps to '$($target.Target)', which has no label"
       }
