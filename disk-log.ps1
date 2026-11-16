@@ -18,6 +18,28 @@ $ErrorActionPreference = 'SilentlyContinue'
 $Game =@($Game | ForEach-Object { $_ -replace '\.exe$', '' })   # 'r5apex.exe' would become --process_name r5apex.exe.exe and never match
 $PSDefaultParameterValues['Set-Content:Encoding'] = 'utf8'; $PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'   # PS 5.1 would write ANSI (Add-Content) / UTF-16 (Tee-Object): grep and editors choke on it
 
+function Get-FrameViewCapture($file) {
+  if ($file.Name -match '^FrameView_(.+)_(\d{4}_\d\d_\d\dT\d{6})_Log\.csv$') {
+    $start = [datetime]::MinValue
+    if ([datetime]::TryParseExact($Matches[2], 'yyyy_MM_ddTHHmmss', [Globalization.CultureInfo]::InvariantCulture, 'None', [ref]$start)) {
+      [pscustomobject]@{ Application = $Matches[1]; Start = $start }
+    }
+  }
+}
+
+function Select-FrameViewFiles($files, $games) {
+  $matched = @(foreach ($file in $files) {
+    $capture = Get-FrameViewCapture $file
+    if (-not $capture) { continue }
+    $hit = Import-Csv -LiteralPath $file.FullName -Encoding UTF8 | Where-Object {
+      $app = if ($_.Application) { $_.Application.Trim() } else { $capture.Application }
+      $games -contains ($app -replace '^.*[\\/]' -replace '\.exe$')
+    } | Select-Object -First 1
+    if ($hit) { $file }
+  })
+  if ($matched.Count) { $matched } else { $files }
+}
+
 function Write-Summary($run) {
   $csvF = Join-Path $run 'log.csv'; $evF = Join-Path $run 'events.txt'; $sumF = Join-Path $run 'summary.txt'
   $rows = @(Import-Csv $csvF)
@@ -26,38 +48,26 @@ function Write-Summary($run) {
   $dcols = @($cols | Where-Object { $_ -match ' latMs$' } | ForEach-Object { $_ -replace ' latMs$','' })
   $g = @($rows | Where-Object gameOn -eq '1'); $use = @(if ($g.Count) { $g } else { $rows })   # @(): a 1-row log would unroll to a scalar without .Count
   $warm = ''
-  # note: seconds of the day, a run across midnight is not handled. [:.]: logs written before v1.0.1 on fi-FI and similar have 13.45.10
-  $secs = { param($t) $q = $t -split '[:.]'; [int]$q[0] * 3600 + [int]$q[1] * 60 + [int]$q[2] }
+  # Older fi-FI logs use 13.45.10. Keep the printed wall clock and compare on a continuous timeline.
+  $day = 0; $previous = 0
+  foreach ($row in $rows) {
+    $q = $row.time -split '[:.]'
+    $tod = [int]$q[0] * 3600 + [int]$q[1] * 60 + [int]$q[2]
+    if ($tod -lt $previous) { $day += 86400 }
+    $row | Add-Member -NotePropertyName LogSecond -NotePropertyValue ($day + $tod)
+    $previous = $tod
+  }
   $clock = { param($s) [timespan]::FromSeconds([math]::Floor($s)).ToString('hh\:mm\:ss') }
   # frame times: PresentMon's frames.csv, or the per-frame logs of NVIDIA FrameView (FrameView_<exe>_<date>T<time>_Log.csv) when there is
   # no frames.csv or -FrameView names one. Only the game's busiest swap chain, sorted by time.
   $fT = [double[]]@(); $fMs = [double[]]@(); $fs = @(); $frF = Join-Path $run 'frames.csv'; $by = @{}; $fvNote = ''; $xs = $null
   $fvN = 'MsPCLatency', 'Dropped', 'CPU Package Temp(C)', 'CPU Package Power(W)', 'NV Pwr(W) (API)'   # FrameView extras, read by column name
-  $fvF = @(if ($FrameView) { Get-Item $FrameView } else { Get-ChildItem $run -Filter 'FrameView_*_Log.csv' | Sort-Object Name })
-  $NewSc = { [pscustomobject]@{ T = New-Object Collections.Generic.List[double]; F = New-Object Collections.Generic.List[double]; X = New-Object Collections.Generic.List[double[]] } }
-  if ($fvF.Count -and ($FrameView -or -not (Test-Path $frF))) {
-    $inv = [Globalization.CultureInfo]::InvariantCulture; $flt = [Globalization.NumberStyles]::Float; $nFv = 0
-    foreach ($ff in $fvF) {
-      # TimeInSeconds counts from the start of the capture and the file name carries that start as local time: no clock alignment needed.
-      # ponytail: plain Split(','), so a quoted field with a comma in it would shift the columns; parse quotes if a real log ever has one
-      if ($ff.Name -notmatch '_\d{4}_\d\d_\d\dT(\d\d)(\d\d)(\d\d)_Log\.csv$') { continue }
-      $start = [int]$Matches[1] * 3600 + [int]$Matches[2] * 60 + [int]$Matches[3]; $ix = $null
-      foreach ($ln in [IO.File]::ReadLines($ff.FullName)) {
-        $fc = $ln.Split(',')
-        if (-not $ix) { $ix = @{}; for ($j = 0; $j -lt $fc.Count; $j++) { $ix[$fc[$j].Trim()] = $j }
-          if (-not ($ix.ContainsKey('TimeInSeconds') -and $ix.ContainsKey('MsBetweenPresents'))) { break }; $nFv++; continue }
-        $ts = 0.0; $ms = 0.0
-        if ($fc.Count -le [math]::Max($ix['TimeInSeconds'], $ix['MsBetweenPresents']) -or -not [double]::TryParse($fc[$ix['TimeInSeconds']], $flt, $inv, [ref]$ts) -or -not [double]::TryParse($fc[$ix['MsBetweenPresents']], $flt, $inv, [ref]$ms)) { continue }
-        $sc = if ($ix.ContainsKey('SwapChainAddress')) { $fc[$ix['SwapChainAddress']] } else { '' }
-        if (-not $by.ContainsKey($sc)) { $by[$sc] = & $NewSc }
-        $x = New-Object double[] $fvN.Count   # NaN = the column is missing or holds NA
-        for ($j = 0; $j -lt $fvN.Count; $j++) { $v = 0.0; $c = $ix[$fvN[$j]]; $x[$j] = if ($null -ne $c -and $c -lt $fc.Count -and [double]::TryParse($fc[$c], $flt, $inv, [ref]$v)) { $v } else { [double]::NaN } }
-        $by[$sc].T.Add(($start + $ts) % 86400); $by[$sc].F.Add($ms); $by[$sc].X.Add($x)
-      }
-    }
-    if ($nFv) { $fvNote = "NVIDIA FrameView log ($nFv file$(if ($nFv -gt 1) { 's' }))" }
-  } elseif (Test-Path $frF) {
+  $fvF = @(if ($FrameView) { Get-Item -LiteralPath $FrameView } else { Get-ChildItem $run -Filter 'FrameView_*_Log.csv' | Sort-Object Name })
+  $NewSc = { [pscustomobject]@{ InSpan = 0; T = New-Object Collections.Generic.List[double]; F = New-Object Collections.Generic.List[double]; X = New-Object Collections.Generic.List[double[]] } }
+  $gameFrom = $use[0].LogSecond; $gameEnd = $use[-1].LogSecond + 2
+  if (-not ($FrameView -and $fvF.Count) -and (Test-Path -LiteralPath $frF)) {
     $iT = -1; $iF = -1; $iS = -1
+    $dateKey = $null; $firstDate = $null
     foreach ($ln in [IO.File]::ReadLines($frF)) {
       $fc = $ln.Split(',')
       # the last *DateTime column wins: CPUStartDateTime when TimeInDateTime is there too (PresentMon 2.x)
@@ -65,21 +75,87 @@ function Write-Summary($run) {
         if ($iT -lt 0 -or $iF -lt 0) { break }; continue }   # header without --date_time / frame times: nothing to read
       $ms = 0.0
       if ($fc.Count -le [math]::Max($iT, $iF) -or -not [double]::TryParse($fc[$iF], [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$ms)) { continue }
-      $hms = $fc[$iT].Split(' ')[-1].Split(':')   # "2026-10-25 9:03:07.123456789", local time
+      $stamp = $fc[$iT].Split(' ')
+      if ($stamp.Count -ne 2) { continue }
+      $hms = $stamp[1].Split(':')   # "2026-10-25 9:03:07.123456789", local time
       if ($hms.Count -ne 3) { continue }   # 'NA' or blank time: skip the row, or T and F lose step
+      if ($stamp[0] -ne $dateKey) {
+        $date = [datetime]::MinValue
+        if (-not [datetime]::TryParseExact($stamp[0], 'yyyy-M-d', [Globalization.CultureInfo]::InvariantCulture, 'None', [ref]$date)) { continue }
+        if ($null -eq $firstDate) { $firstDate = $date }
+        $dateKey = $stamp[0]; $daySeconds = ($date - $firstDate).TotalSeconds
+      }
+      $hour = 0; $minute = 0; $second = 0.0
+      if ($ms -le 0 -or [double]::IsNaN($ms) -or [double]::IsInfinity($ms) -or
+          -not [int]::TryParse($hms[0], [ref]$hour) -or $hour -lt 0 -or $hour -gt 23 -or
+          -not [int]::TryParse($hms[1], [ref]$minute) -or $minute -lt 0 -or $minute -gt 59 -or
+          -not [double]::TryParse($hms[2], [ref]$second) -or -not ($second -ge 0 -and $second -lt 60)) { continue }
       $sc = if ($iS -ge 0) { $fc[$iS] } else { '' }
       if (-not $by.ContainsKey($sc)) { $by[$sc] = & $NewSc }
-      $by[$sc].T.Add([int]$hms[0] * 3600 + [int]$hms[1] * 60 + [double]$hms[2]); $by[$sc].F.Add($ms)
+      $by[$sc].T.Add($daySeconds + $hour * 3600 + $minute * 60 + $second); $by[$sc].F.Add($ms)
     }
   }
   $best = $by.Values | Sort-Object { $_.F.Count } -Descending | Select-Object -First 1
-  if ($best) { $fT = $best.T.ToArray()
+  if (-not $best -and $fvF.Count) {
+    $apps = @{}; $inv = [Globalization.CultureInfo]::InvariantCulture; $flt = [Globalization.NumberStyles]::Float
+    $logDate = [datetime]::MinValue
+    # Old or renamed run folders carry only a time of day. Anchor the first capture to the nearest day.
+    $folder = Split-Path -Leaf $run
+    if ($folder -match '^run-(\d{4}-\d\d-\d\d)_') {
+      [void][datetime]::TryParseExact($Matches[1], 'yyyy-MM-dd', $inv, 'None', [ref]$logDate)
+    }
+    foreach ($ff in $fvF) {
+      $capture = Get-FrameViewCapture $ff
+      if (-not $capture) { continue }
+      if ($logDate -eq [datetime]::MinValue) {
+        $offset = [math]::Round(($capture.Start.TimeOfDay.TotalSeconds - $rows[0].LogSecond) / 86400)
+        $logDate = $capture.Start.Date.AddDays($offset)
+      }
+      $start = ($capture.Start - $logDate).TotalSeconds
+      # Import-Csv streams quoted fields, including doubled quotes and embedded commas.
+      Import-Csv -LiteralPath $ff.FullName -Encoding UTF8 | ForEach-Object {
+        $ts = 0.0; $ms = 0.0
+        if (-not [double]::TryParse($_.TimeInSeconds, $flt, $inv, [ref]$ts) -or
+            -not [double]::TryParse($_.MsBetweenPresents, $flt, $inv, [ref]$ms) -or
+            [double]::IsNaN($ts) -or [double]::IsInfinity($ts) -or
+            [double]::IsNaN($ms) -or [double]::IsInfinity($ms) -or $ms -le 0) { return }
+        $app = if ($_.Application) { $_.Application.Trim() -replace '^.*[\\/]' } else { $capture.Application }
+        $key = $app -replace '\.exe$'
+        if (-not $apps.ContainsKey($key)) { $apps[$key] = @{ Name = $app; FramesInSpan = 0; Captures = @{} } }
+        $group = $apps[$key]; $sc = [string]$_.SwapChainAddress; $time = $start + $ts
+        if (-not $group.Captures.ContainsKey($ff.FullName)) { $group.Captures[$ff.FullName] = @{} }
+        $chains = $group.Captures[$ff.FullName]
+        if (-not $chains.ContainsKey($sc)) { $chains[$sc] = & $NewSc }
+        $chain = $chains[$sc]
+        if ($time -ge $gameFrom -and $time -lt $gameEnd) { $group.FramesInSpan++; $chain.InSpan++ }
+        $x = New-Object double[] $fvN.Count
+        for ($j = 0; $j -lt $fvN.Count; $j++) {
+          $v = 0.0; $field = $fvN[$j]
+          $x[$j] = if ([double]::TryParse($_.$field, $flt, $inv, [ref]$v)) { $v } else { [double]::NaN }
+        }
+        $chain.T.Add($time); $chain.F.Add($ms); $chain.X.Add($x)
+      }
+    }
+    $candidates = @($Game | Where-Object { $apps.ContainsKey($_) } | ForEach-Object { $apps[$_] })
+    if (-not $candidates.Count) { $candidates = @($apps.Values | Where-Object { $_.FramesInSpan -gt 0 }) }
+    $selected = $candidates | Sort-Object @{ Expression = { $_.FramesInSpan }; Descending = $true }, @{ Expression = { $_.Name } } | Select-Object -First 1
+    if ($selected) {
+      # A new capture may use a different swap-chain address. Take one chain per capture.
+      $best = & $NewSc; $nFv = 0
+      foreach ($chains in $selected.Captures.Values) {
+        $chain = $chains.Values | Sort-Object InSpan -Descending | Select-Object -First 1
+        if (-not $chain.InSpan) { continue }
+        $nFv++
+        $best.T.AddRange($chain.T); $best.F.AddRange($chain.F); $best.X.AddRange($chain.X)
+      }
+      $fvNote = "NVIDIA FrameView log ($nFv file$(if ($nFv -gt 1) { 's' })) for $($selected.Name)"
+    }
+  }
+  if ($best -and $best.T.Count) { $fT = $best.T.ToArray()
     if (-not $fvNote) {
-      # PresentMon 2.3.1 writes its "local" time shifted by the UTC offset (seen: +2 h). Align with log.csv by the whole half hours between
-      # the first frame in the file and the first game row (the game presents within seconds of starting; time zones are whole or half hours).
-      # Shift and wrap BEFORE sorting: the skewed clock passes midnight at 22:00 real time.
-      $g0 = if ($g.Count) { $g[0] } else { $rows[0] }; $sh = 1800 * [math]::Round(($fT[0] - (& $secs $g0.time)) / 1800)
-      if ($sh) { for ($j = 0; $j -lt $fT.Count; $j++) { $fT[$j] = ((($fT[$j] - $sh) % 86400) + 86400) % 86400 } }
+      # PresentMon's local timestamp can be hours ahead. Keep the calendar day differences across midnight.
+      $shift = 1800 * [math]::Round(($fT[0] - $gameFrom) / 1800)
+      if ($shift) { for ($j = 0; $j -lt $fT.Count; $j++) { $fT[$j] -= $shift } }
     }
     # sort by time through an index, so the frame times (and the FrameView extras) follow
     $ord = New-Object int[] $fT.Count; for ($j = 0; $j -lt $ord.Count; $j++) { $ord[$j] = $j }
@@ -101,9 +177,9 @@ function Write-Summary($run) {
   if ($g.Count) {
     # the game's launch (a 200 000 pages/s read burst) and its exit (working set falls to ~0) are normal, not stutter: leave them out of the verdict.
     # With frame times the playing span decides; without them, skip 120 s after a launch seen in the log.
-    $from = if ([double]$g[0].gameMB -lt 1500) { (& $secs $g[0].time) + 120 } else { 0 }
+    $from = if ([double]$g[0].gameMB -lt 1500) { $g[0].LogSecond + 120 } else { 0 }
     # (the last 5 samples are cut off too: that is the game closing)
-    $core = @($g[0..([math]::Max(0, $g.Count - 6))] | Where-Object { $t = & $secs $_.time; [double]$_.gameMB -ge 200 -and $(if ($span) { $t -ge $span[0] -and $t -lt $span[1] } else { $t -ge $from }) })
+    $core = @($g[0..([math]::Max(0, $g.Count - 6))] | Where-Object { $t = $_.LogSecond; [double]$_.gameMB -ge 200 -and $(if ($span) { $t -ge $span[0] -and $t -lt $span[1] } else { $t -ge $from }) })
     if ($core.Count) { $use = $core; if ($core.Count -lt $g.Count) { $warm = if ($span) { ", loading skipped by frame rate: $(& $clock $span[0])-$(& $clock $span[1]) used" } else { ", game start-up/exit skipped" } } }
   }
   $Vals = { param($r, $name) @($r | ForEach-Object { [double]$_.$name }) }   # not $N/$n: PowerShell variables are case-insensitive
@@ -125,7 +201,7 @@ function Write-Summary($run) {
   }
   # frame stats only over the time span of the rows used above
   if ($fT.Count) {
-    $f0 = & $FrameAt (& $secs $use[0].time); $f1 = (& $FrameAt ((& $secs $use[-1].time) + 2)) - 1
+    $f0 = & $FrameAt $use[0].LogSecond; $f1 = (& $FrameAt ($use[-1].LogSecond + 2)) - 1
     if ($span) { $f0 = [math]::Max($f0, (& $FrameAt $span[0])); $f1 = [math]::Min($f1, (& $FrameAt $span[1]) - 1) }   # row + 2 s can reach past the span end
     if ($f1 -ge $f0) { $fs = [double[]]$fMs[$f0..$f1] }
   }
@@ -156,6 +232,7 @@ function Write-Summary($run) {
   $cp = & $Vals $use cpu; $cpuHi = 100 * @($cp | Where-Object { $_ -gt 90 -and $_ -le 100 }).Count / [math]::Max(1, $cp.Count)
   $memBad = ($availMin -lt 1000) -or ($pgInMax -gt 50000)
   $L += ''; $L += 'Verdict:'; $any = $false
+  if (-not $g.Count) { $L += ' - Game not found: these measurements cover the desktop. Find the game process name in Task Manager, Details tab, and use it for the next log.' }
   if ($memBad) { $any = $true; $L += " - MEMORY pressure: free RAM min $([int]$availMin) MB, paging in up to $([int]$pgInMax)/s. Close background apps (browser, dev tools, chat and AI apps) before the game, or add RAM." }
   if ($memBad -and ($cols -contains 'standbyMB')) {
     $low = $use[[array]::IndexOf(@(& $Vals $use availMB), $availMin)]
@@ -176,8 +253,9 @@ function Write-Summary($run) {
   }
   if ($cols -contains 'pingNetMs') {
     $okG = @($pg1 | Where-Object { $_ -ge 0 }); $okN = @($pn1 | Where-Object { $_ -ge 0 })
-    $lossPct = 100 * @($pg1 + $pn1 | Where-Object { $_ -lt 0 }).Count / [math]::Max(1, $pg1.Count + $pn1.Count)
-    if ($lossPct -ge 1 -or @($okG | Where-Object { $_ -gt 50 }).Count -ge 2 -or @($okN | Where-Object { $_ -gt 150 }).Count -ge 3) {
+    $lost = @($pg1 + $pn1 | Where-Object { $_ -lt 0 }).Count
+    $lossPct = 100 * $lost / [math]::Max(1, $pg1.Count + $pn1.Count)
+    if (($lost -ge 3 -and $lossPct -ge 1) -or @($okG | Where-Object { $_ -gt 50 }).Count -ge 2 -or @($okN | Where-Object { $_ -gt 150 }).Count -ge 3) {
       $any = $true; $L += ' - NETWORK: {0:N1} % of pings lost, gateway RTT {1}, internet RTT {2}: lag spikes come from the connection (Wi-Fi, router, background downloads), not the PC.' -f $lossPct, (& $Rt $okG), (& $Rt $okN) }
   }
   # nvidia throttle bits that count: 8 HW slowdown, 32 SW thermal, 64 HW thermal, 128 HW power brake. NOT 1 idle, 2 app clocks, 256 display clocks, and NOT 4 SW power cap:
@@ -211,8 +289,8 @@ function Write-Summary($run) {
       if (($cols -contains 'cpuMHz') -and @($w | Where-Object { "$($_.cpuMHz)" -ne '' -and [double]$_.cpu -gt 50 -and [double]$_.cpuMHz -lt 0.6 * $hzPeak }).Count) { $why += 'CPU clock' }
       if (($cols -contains 'gpuThrottle') -and @(& $Got $w gpuThrottle | Where-Object { ([long]$_ -band $thMask) -ne 0 }).Count) { $why += 'GPU throttle' }
       $fx = ''; $fm = 0
-      if ($fs.Count) { $wEnd = (& $secs $w[-1].time) + 1
-        for ($j = & $FrameAt ((& $secs $w[0].time) - 1); $j -lt $fT.Count -and $fT[$j] -le $wEnd; $j++) { $fm = [math]::Max($fm, $fMs[$j]) }
+      if ($fs.Count) { $wEnd = $w[-1].LogSecond + 1
+        for ($j = & $FrameAt ($w[0].LogSecond - 1); $j -lt $fT.Count -and $fT[$j] -le $wEnd; $j++) { $fm = [math]::Max($fm, $fMs[$j]) }
         $fx = ', frame max {0:N0} ms' -f $fm }
       $res = if ($why) { $why -join ' + ' } elseif ($fs.Count -and $fm -gt $hitchMs) { 'frame hitch while RAM, disk, CPU, GPU and network were normal: game or driver side' }
         else { 'RAM, disk, CPU, GPU and network all normal: not a system bottleneck' + $(if ($fs.Count) { '; no frame hitch either' } else { '' }) }
@@ -377,6 +455,7 @@ try {
   # NVIDIA FrameView logs recorded during this run: take a copy along (FrameView's own files stay where they are)
   $fvDir = @(Get-Content "$env:ProgramFiles\NVIDIA Corporation\FrameView\Settings.ini" | ForEach-Object { if ($_ -match '^BenchmarkDirectory=(.+)$') { $Matches[1].Trim() } })[0]
   if (-not $fvDir) { $fvDir = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'FrameView' }
-  Get-ChildItem $fvDir -Filter 'FrameView_*_Log.csv' | Where-Object { $_.LastWriteTime -ge $started } | Copy-Item -Destination $run
+  $recent = @(Get-ChildItem -LiteralPath $fvDir -Filter 'FrameView_*_Log.csv' -File | Where-Object { $_.LastWriteTime -ge $started })
+  Select-FrameViewFiles $recent $Game | Copy-Item -Destination $run
   Write-Summary $run
 }

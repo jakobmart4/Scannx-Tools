@@ -2,10 +2,16 @@
 rem Scannx launcher. Double-click it: it asks for administrator rights (UAC), then shows a menu.
 rem Admin shows the Defender exclusion list and lets the stutter log record frame times. Nothing here changes your system.
 rem The path goes to PowerShell through %SELF%, not inside a quoted string: an apostrophe in a folder name would break that.
+if not exist "%~dp0scan-check.ps1" (
+  echo Unzip first: extract the entire Scannx zip, then open Scannx.cmd.
+  pause
+  exit /b 1
+)
 set "SELF=%~f0"
-fltmc >nul 2>&1 || (powershell -NoProfile -Command "Start-Process -FilePath $env:SELF -Verb RunAs" & exit /b)
+set "PSEXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+"%SystemRoot%\System32\fltmc.exe" >nul 2>&1 || ("%PSEXE%" -NoProfile -Command "Start-Process -FilePath $env:SELF -Verb RunAs" & exit /b)
 cd /d "%~dp0"
-set "PS=powershell -NoProfile -ExecutionPolicy Bypass -File"
+set PS="%PSEXE%" -NoProfile -ExecutionPolicy Bypass -File
 
 :menu
 echo.
