@@ -5,6 +5,15 @@ if (-not $Root) { $Root = Join-Path $PSScriptRoot 'fixtures' }   # $PSScriptRoot
 $h1 = 'time,cpu,cpuQueue,availMB,commitPct,pgIn,pgOut,faults,modMB,netMBs,gpuMaxPct,vramMB,gameOn,gameCpuPct,gameMB,mark'
 $h2 = '0 c: latMs,0 c: busyPct,0 c: queue,0 c: MBs,1 e: latMs,1 e: busyPct,1 e: queue,1 e: MBs'
 $h3 = 'cpuMHz,pingGwMs,pingNetMs,gpuTempC,gpuClockMHz,gpuThrottle'
+# A number must reach the CSV with a '.', whatever the regional format says: on a de-DE Windows
+# -join ',' wrote 0.1 as 0,1 and so split one value into two columns.
+$inv = [Globalization.CultureInfo]::InvariantCulture
+function CsvLine($values) {
+  $cells = foreach ($value in $values) {
+    if ($value -is [IFormattable]) { $value.ToString($null, $inv) } else { [string]$value }
+  }
+  return ($cells -join ',')
+}
 # $mem = standbyMB,freeMB,pagefilePct after mark; $new = also the clock/ping/GPU columns (ping and GPU only on every 3rd row, blank otherwise).
 # Without them the fixture is an older log format (back-compat test).
 function Build($case, $n, $f, $spikes, $mem, $new, $base = '10:00:00') {
@@ -16,7 +25,7 @@ function Build($case, $n, $f, $spikes, $mem, $new, $base = '10:00:00') {
     $v = @($t, $r.cpu, 0, $r.avail, $r.commit, $r.pgIn, 0, 5000, 1, 0.1, $r.gpu, 3000, $gameOn, 30, $r.game, $r.mark)
     if ($mem) { $v += $r.standby, $r.free, $r.pf }
     if ($new) { $v += $r.mhz; $v += if ($i % 3 -eq 0) { $r.gw, $r.net, $r.temp, $r.clk, $r.thr } else { '', '', '', '', '' } }
-    ($v + @(0.2, 1, 0, 1, $latMs, 1, 0, 1)) -join ',' }
+    CsvLine ($v + @(0.2, 1, 0, 1, $latMs, 1, 0, 1)) }
   (@("$head,$h2") + $rows) | Set-Content (Join-Path $d 'log.csv') -Encoding utf8
   (@('Logging for 60 min (synthetic fixture).') + $spikes) | Set-Content (Join-Path $d 'events.txt') -Encoding utf8
 }
